@@ -37,9 +37,9 @@ ARCHIVE     = "https://archive.prod.nado.xyz/v1"
 HEADERS     = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
 ORDER_SIZE  = 0.0015
-TAKE_PROFIT = 2.0
-STOP_LOSS   = 0.8
-TRAIL_PCT   = 1.0
+TAKE_PROFIT = 1.0
+STOP_LOSS   = 0.5
+TRAIL_PCT   = 0.5
 COOLDOWN    = 3
 
 RSI_LOW     = 35
