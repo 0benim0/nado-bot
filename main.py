@@ -160,12 +160,18 @@ def trend_1h(cs_1h):
     cur  = cl[-1]
     if not e21 or not e50: return None
 
-    # Klarer Aufwärtstrend: Preis > EMA21 > EMA50
-    if cur > e21 and e21 > e50:
-        return "LONG"
-    # Klarer Abwärtstrend: Preis < EMA21 < EMA50
-    if cur < e21 and e21 < e50:
-        return "SHORT"
+    # Schnelle Trendwende: letzte 2 Kerzen bärisch/bullisch
+    last2_bearish = cs_1h[-1]["c"] < cs_1h[-1]["o"] and cs_1h[-2]["c"] < cs_1h[-2]["o"]
+    last2_bullish = cs_1h[-1]["c"] > cs_1h[-1]["o"] and cs_1h[-2]["c"] > cs_1h[-2]["o"]
+
+    # Klarer Aufwärtstrend: Preis > EMA21 > EMA50 ODER letzte 2 bullisch
+    if cur > e21 and e21 > e50: return "LONG"
+    if cur < e21 and e21 < e50: return "SHORT"
+
+    # Schnelle Trendwende erkennen
+    if last2_bearish and cur < e21: return "SHORT"
+    if last2_bullish and cur > e21: return "LONG"
+
     return None  # Seitwärts — kein Trade
 
 
