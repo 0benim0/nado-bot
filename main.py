@@ -46,7 +46,7 @@ RSI_LOW     = 35
 RSI_HIGH    = 65
 MIN_SIG     = 4
 INTERVAL    = 30
-DRY_RUN     = False
+DRY_RUN     = True
 STATE_FILE  = "state.json"
 # ═══════════════════════════════════════════════════════════
 
