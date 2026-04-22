@@ -45,7 +45,7 @@ COOLDOWN    = 2
 MIN_CANDLES_5M = 30
 MIN_CANDLES_1H = 50
 INTERVAL       = 30
-DRY_RUN        = False
+DRY_RUN        = True
 STATE_FILE     = "state.json"
 # ═══════════════════════════════════════════════════════════
 
