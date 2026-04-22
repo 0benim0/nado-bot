@@ -37,9 +37,9 @@ ARCHIVE     = "https://archive.prod.nado.xyz/v1"
 HEADERS     = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
 ORDER_SIZE  = 0.0015
-TAKE_PROFIT = 0.5
-STOP_LOSS   = 0.3
-TRAIL_PCT   = 0.3
+TAKE_PROFIT = 1.0
+STOP_LOSS   = 0.5
+TRAIL_PCT   = 0.5
 COOLDOWN    = 2
 
 MIN_CANDLES_5M = 30
@@ -360,11 +360,11 @@ def loop():
                 # Volume Profile berechnen
                 vp = volume_profile(cs_5m)
 
-                # Entry: EMA Richtung + 1H Trend + Volume Profile alle übereinstimmen
-                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG" and vp == "LONG":
+                # Entry: EMA Richtung + 1H Trend (VP nur zur Info)
+                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG":
                     log(f"🎯 LONG (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
                     open_pos("LONG", preis)
-                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT" and vp == "SHORT":
+                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT":
                     log(f"🎯 SHORT (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
                     open_pos("SHORT", preis)
                 else:
