@@ -1,12 +1,12 @@
 """
-Nado.xyz Trading Bot — EMA Crossover
-======================================
+Nado.xyz Trading Bot — Support/Resistance + EMA + Trend
+=========================================================
 Strategie:
-- 1H Kerzen: Trend-Filter (EMA21/EMA50)
-- 5-Min Kerzen: EMA9 kreuzt EMA21 → Entry
-- Während Trade: dynamisch prüfen ob Trend dreht
+- 1H Kerzen: Trend Filter (EMA21/EMA50)
+- 5-Min Kerzen: Support/Resistance Levels berechnen
+- Einstieg nur wenn Preis an Support/Resistance + EMA bestätigt
 - Limit Orders 0.1% Slippage
-- TP 1% / SL 0.5% / Trail 0.5%
+- TP 1% / SL 0.5% / Trail 0.3%
 
 Einrichten:
     SIGNER_KEY = 1-Click Trading Key (app.nado.xyz → Settings)
@@ -39,20 +39,19 @@ HEADERS     = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 ORDER_SIZE  = 0.0015
 TAKE_PROFIT = 1.0
 STOP_LOSS   = 0.5
-TRAIL_PCT   = 0.5
+TRAIL_PCT   = 0.3
 COOLDOWN    = 2
 
-MIN_CANDLES_5M = 30
-MIN_CANDLES_1H = 50
-INTERVAL       = 30
-DRY_RUN        = False
-STATE_FILE     = "state.json"
+SR_TOLERANCE = 0.002   # 0.2% Toleranz um Support/Resistance Level
+SR_TOUCHES   = 2       # Mindestanzahl Berührungen für gültiges Level
+INTERVAL     = 30
+DRY_RUN      = False
+STATE_FILE   = "state.json"
 # ═══════════════════════════════════════════════════════════
 
 pos    = None
 cool   = 0
 trades = wins = loss = 0
-prev_cross = None  # letzter EMA Crossover Status
 
 
 def ts():    return datetime.now().strftime("%H:%M:%S")
@@ -68,20 +67,19 @@ def save_state():
     try:
         with open(STATE_FILE, "w") as f:
             json.dump({"pos": pos, "trades": trades, "wins": wins,
-                      "loss": loss, "cool": cool, "prev_cross": prev_cross}, f)
+                      "loss": loss, "cool": cool}, f)
     except: pass
 
 def load_state():
-    global pos, trades, wins, loss, cool, prev_cross
+    global pos, trades, wins, loss, cool
     try:
         if os.path.exists(STATE_FILE):
             d = json.load(open(STATE_FILE))
-            pos        = d.get("pos")
-            trades     = d.get("trades", 0)
-            wins       = d.get("wins", 0)
-            loss       = d.get("loss", 0)
-            cool       = d.get("cool", 0)
-            prev_cross = d.get("prev_cross")
+            pos    = d.get("pos")
+            trades = d.get("trades", 0)
+            wins   = d.get("wins", 0)
+            loss   = d.get("loss", 0)
+            cool   = d.get("cool", 0)
             if pos: log(f"State: {pos['dir']} @ {fmt(pos['entry'])} | {trades}T {wins}W {loss}L", Y)
             else:   log(f"State: kein Trade | {trades}T {wins}W {loss}L", C)
     except Exception as e:
@@ -100,11 +98,13 @@ def get_kerzen(granularity, limit):
         if r.status_code != 200: return None
         cs = r.json().get("candlesticks", [])
         if not cs: return None
-        candles = [{"o": float(c.get("open_x18",0))/1e18, "h": float(c.get("high_x18",0))/1e18,
-                    "l": float(c.get("low_x18",0))/1e18,  "c": float(c.get("close_x18",0))/1e18,
+        candles = [{"o": float(c.get("open_x18",0))/1e18,
+                    "h": float(c.get("high_x18",0))/1e18,
+                    "l": float(c.get("low_x18",0))/1e18,
+                    "c": float(c.get("close_x18",0))/1e18,
                     "v": float(c.get("volume",0))/1e18}
                    for c in cs]
-        return list(reversed(candles))  # älteste zuerst, neueste zuletzt
+        return list(reversed(candles))
     except Exception as e:
         log(f"Kerzen Fehler: {e}", Y); return None
 
@@ -132,69 +132,80 @@ def calc_ema(c, n):
     for x in c[n:]: e=x*k+e*(1-k)
     return e
 
-def volume_profile(cs):
-    """
-    Berechnet POC (Point of Control) — Preisniveau mit meistem Volumen.
-    Gibt 'LONG' wenn aktueller Preis über POC, 'SHORT' wenn darunter.
-    """
-    if not cs or len(cs) < 10: return None
-    # Volumen pro Preisniveau berechnen
-    vol_map = {}
-    for c in cs:
-        price_level = round((c["h"] + c["l"]) / 2)  # Mitte der Kerze auf  gerundet
-        vol = c.get("v", 0)
-        vol_map[price_level] = vol_map.get(price_level, 0) + vol
-    if not vol_map: return None
-    poc = max(vol_map, key=vol_map.get)  # Preisniveau mit meistem Volumen
-    cur = cs[-1]["c"]
-    if cur > poc: return "LONG"
-    if cur < poc: return "SHORT"
-    return None
-
-def ema_crossover(cs):
-    """
-    Prüft EMA9/EMA21 Crossover auf 5-Min Kerzen.
-    Gibt 'LONG' wenn EMA9 über EMA21 kreuzt,
-         'SHORT' wenn EMA9 unter EMA21 kreuzt,
-         None wenn kein Crossover.
-    """
-    if len(cs) < 25: return None, None, None
-    cl   = [c["c"] for c in cs]
-    e9   = calc_ema(cl, 9)
-    e21  = calc_ema(cl, 21)
-    # Vorherige Werte
-    e9_prev  = calc_ema(cl[:-1], 9)
-    e21_prev = calc_ema(cl[:-1], 21)
-
-    if not e9 or not e21 or not e9_prev or not e21_prev:
-        return None, e9, e21
-
-    # Crossover erkannt
-    if e9_prev <= e21_prev and e9 > e21:
-        return "LONG", e9, e21   # EMA9 kreuzt nach oben
-    if e9_prev >= e21_prev and e9 < e21:
-        return "SHORT", e9, e21  # EMA9 kreuzt nach unten
-
-    # Kein Crossover — aber aktuelle Richtung
-    return None, e9, e21
-
 def trend_1h(cs_1h):
-    """1H Trend-Filter basierend auf EMA21/EMA50."""
-    if not cs_1h or len(cs_1h) < MIN_CANDLES_1H: return None
+    """1H Trend Filter."""
+    if not cs_1h or len(cs_1h) < 50: return None
     cl  = [c["c"] for c in cs_1h]
     e21 = calc_ema(cl, 21)
     e50 = calc_ema(cl, 50)
     cur = cl[-1]
     if not e21 or not e50: return None
-
-    # Letzten 2 Kerzen für schnelle Trendwende
     last2_bear = cs_1h[-1]["c"] < cs_1h[-1]["o"] and cs_1h[-2]["c"] < cs_1h[-2]["o"]
     last2_bull = cs_1h[-1]["c"] > cs_1h[-1]["o"] and cs_1h[-2]["c"] > cs_1h[-2]["o"]
-
     if cur > e21 and e21 > e50: return "LONG"
     if cur < e21 and e21 < e50: return "SHORT"
     if last2_bear and cur < e21: return "SHORT"
     if last2_bull and cur > e21: return "LONG"
+    return None
+
+def ema_richtung(cs):
+    """EMA9/21 Richtung."""
+    if len(cs) < 25: return None
+    cl  = [c["c"] for c in cs]
+    e9  = calc_ema(cl, 9)
+    e21 = calc_ema(cl, 21)
+    if not e9 or not e21: return None
+    if e9 > e21: return "LONG"
+    if e9 < e21: return "SHORT"
+    return None
+
+def find_sr_levels(cs):
+    """
+    Findet Support und Resistance Levels aus lokalen Hochs/Tiefs.
+    Ein Level ist gültig wenn der Preis mindestens SR_TOUCHES mal
+    innerhalb der SR_TOLERANCE reagiert hat.
+    """
+    if len(cs) < 10: return [], []
+
+    supports    = []
+    resistances = []
+
+    # Lokale Tiefs (Support) und Hochs (Resistance) finden
+    for i in range(2, len(cs)-2):
+        # Lokales Tief — Support
+        if cs[i]["l"] < cs[i-1]["l"] and cs[i]["l"] < cs[i-2]["l"] and \
+           cs[i]["l"] < cs[i+1]["l"] and cs[i]["l"] < cs[i+2]["l"]:
+            supports.append(cs[i]["l"])
+
+        # Lokales Hoch — Resistance
+        if cs[i]["h"] > cs[i-1]["h"] and cs[i]["h"] > cs[i-2]["h"] and \
+           cs[i]["h"] > cs[i+1]["h"] and cs[i]["h"] > cs[i+2]["h"]:
+            resistances.append(cs[i]["h"])
+
+    # Levels gruppieren die nah beieinander sind
+    def group_levels(levels):
+        if not levels: return []
+        levels = sorted(levels)
+        grouped = []
+        current_group = [levels[0]]
+        for level in levels[1:]:
+            if abs(level - current_group[-1]) / current_group[-1] < SR_TOLERANCE:
+                current_group.append(level)
+            else:
+                if len(current_group) >= SR_TOUCHES:
+                    grouped.append(sum(current_group) / len(current_group))
+                current_group = [level]
+        if len(current_group) >= SR_TOUCHES:
+            grouped.append(sum(current_group) / len(current_group))
+        return grouped
+
+    return group_levels(supports), group_levels(resistances)
+
+def preis_an_level(preis, levels, toleranz):
+    """Prüft ob aktueller Preis an einem Level ist."""
+    for level in levels:
+        if abs(preis - level) / level <= toleranz:
+            return level
     return None
 
 
@@ -286,9 +297,9 @@ def close_pos(grund, preis):
 # ─── HAUPT LOOP ───────────────────────────────────────────
 
 def loop():
-    global cool, prev_cross
+    global cool
     tick = 0
-    log(f"Bot | EMA Crossover | TP:{TAKE_PROFIT}% SL:{STOP_LOSS}% Trail:{TRAIL_PCT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
+    log(f"Bot | S/R + EMA + Trend | TP:{TAKE_PROFIT}% SL:{STOP_LOSS}% Trail:{TRAIL_PCT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
 
     while True:
         try:
@@ -296,26 +307,27 @@ def loop():
 
             # Daten holen
             preis = get_preis()
-            cs_5m = get_kerzen(300,  60)
+            cs_5m = get_kerzen(300,  100)
             cs_1h = get_kerzen(3600, 100)
 
             if not preis or not cs_5m or not cs_1h:
                 log("Daten fehlen — warte...", Y)
                 time.sleep(INTERVAL); continue
 
-            # Trend und Crossover berechnen
-            trend  = trend_1h(cs_1h)
-            cross, e9, e21 = ema_crossover(cs_5m)
+            # Indikatoren berechnen
+            trend   = trend_1h(cs_1h)
+            ema_dir = ema_richtung(cs_5m)
+            supports, resistances = find_sr_levels(cs_5m)
 
-            # EMA Richtung (auch ohne Crossover)
-            ema_dir = "LONG" if (e9 and e21 and e9 > e21) else "SHORT" if (e9 and e21 and e9 < e21) else None
+            # Preis an Support oder Resistance?
+            at_support    = preis_an_level(preis, supports,    SR_TOLERANCE)
+            at_resistance = preis_an_level(preis, resistances, SR_TOLERANCE)
 
             if pos:
                 is_long = pos["dir"] == "LONG"
                 pnl = (preis-pos["entry"])/pos["entry"]*100 if is_long else (pos["entry"]-preis)/pos["entry"]*100
                 fc  = G if pnl>0 else R
 
-                # Trailing aktualisieren
                 if is_long:
                     pos["best"]  = max(pos["best"], preis)
                     trail        = pos["best"] * (1 - TRAIL_PCT/100)
@@ -327,57 +339,49 @@ def loop():
                 log(f"#{pos['id']} {pos['dir']} | {fmt(pos['entry'])}→{fmt(preis)} | P&L:{fc}{pnl:+.2f}%{X} | Trail:{fmt(trail)} | 1H:{trend_txt}")
                 save_state()
 
-                # TP / SL / Trail prüfen
                 if (is_long and preis >= pos["tp"]) or (not is_long and preis <= pos["tp"]):
                     close_pos("TAKE PROFIT ✅", preis)
                 elif (is_long and preis <= pos["sl"]) or (not is_long and preis >= pos["sl"]):
                     close_pos("STOP LOSS ❌", preis)
                 elif (is_long and preis <= trail) or (not is_long and preis >= trail):
                     close_pos("TRAILING STOP 📉", preis)
-                # Dynamisch: EMA Crossover gegen aktuelle Position → sofort schließen
-                elif cross == "SHORT" and is_long:
-                    log("EMA Crossover gegen LONG → schließen!", Y)
-                    close_pos("EMA UMKEHRUNG 🔄", preis)
-                    if trend == "SHORT":
-                        open_pos("SHORT", preis)
-                elif cross == "LONG" and not is_long:
-                    log("EMA Crossover gegen SHORT → schließen!", Y)
-                    close_pos("EMA UMKEHRUNG 🔄", preis)
-                    if trend == "LONG":
-                        open_pos("LONG", preis)
+                # EMA dreht gegen Position → schließen
+                elif ema_dir == "SHORT" and is_long and trend == "SHORT":
+                    close_pos("EMA + TREND UMKEHRUNG 🔄", preis)
+                elif ema_dir == "LONG" and not is_long and trend == "LONG":
+                    close_pos("EMA + TREND UMKEHRUNG 🔄", preis)
 
             else:
                 if cool > 0:
                     cool -= 1
-                    log(f"Cooldown: {cool} | BTC {fmt(preis)} | 1H:{trend or 'seitwärts'}", Y)
+                    log(f"Cooldown: {cool} | BTC {fmt(preis)}", Y)
                     time.sleep(INTERVAL); continue
 
                 if not trend:
                     if tick % 3 == 0:
-                        log(f"BTC {fmt(preis)} | 1H: Seitwärts — warten", Y)
+                        log(f"BTC {fmt(preis)} | 1H: Seitwärts — kein Trade", Y)
                     time.sleep(INTERVAL); continue
 
-                # Volume Profile berechnen
-                vp = volume_profile(cs_5m)
+                # S/R Level Info
+                sr_txt = ""
+                if at_support:    sr_txt = f" {G}@ Support {fmt(at_support)}{X}"
+                if at_resistance: sr_txt = f" {R}@ Resistance {fmt(at_resistance)}{X}"
 
-                # Entry: EMA Richtung + 1H Trend (VP nur zur Info)
-                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG":
-                    log(f"🎯 LONG (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
+                # Entry Bedingungen:
+                # LONG: 1H LONG + EMA LONG + Preis an Support
+                # SHORT: 1H SHORT + EMA SHORT + Preis an Resistance
+                if trend == "LONG" and ema_dir == "LONG" and at_support:
+                    log(f"🎯 LONG @ Support {fmt(at_support)} (1H:{trend} EMA:{ema_dir})", M)
                     open_pos("LONG", preis)
-                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT":
-                    log(f"🎯 SHORT (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
+                elif trend == "SHORT" and ema_dir == "SHORT" and at_resistance:
+                    log(f"🎯 SHORT @ Resistance {fmt(at_resistance)} (1H:{trend} EMA:{ema_dir})", M)
                     open_pos("SHORT", preis)
                 else:
                     if tick % 2 == 0:
                         trend_txt = f"{G}LONG{X}" if trend=="LONG" else f"{R}SHORT{X}"
-                        e9_fmt  = fmt(e9)  if e9  else "?"
-                        e21_fmt = fmt(e21) if e21 else "?"
-                        cross_txt = f" 🔄{cross}" if cross else ""
-                        vp_log = volume_profile(cs_5m)
-                        vp_txt = f" VP:{G if vp_log=='LONG' else R}{vp_log}{X}" if vp_log else ""
-                        log(f"BTC {fmt(preis)} | 1H:{trend_txt} | EMA9:{e9_fmt} EMA21:{e21_fmt}{cross_txt}{vp_txt} → warten")
+                        sr_info   = f" S:{len(supports)} R:{len(resistances)} Levels"
+                        log(f"BTC {fmt(preis)} | 1H:{trend_txt} | EMA:{ema_dir}{sr_txt}{sr_info} → warten")
 
-            prev_cross = cross
             time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
@@ -390,13 +394,12 @@ def loop():
 
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
-    print(f"  ║    Nado.xyz — EMA Crossover Bot          ║")
-    print(f"  ║  1H Trend + EMA9/21 Cross + Trail Stop   ║")
+    print(f"  ║   Nado.xyz — Support/Resistance Bot      ║")
+    print(f"  ║  1H Trend + EMA + S/R Levels + Trail     ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet: {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
     print(f"  TP:{TAKE_PROFIT}%  SL:{STOP_LOSS}%  Trail:{TRAIL_PCT}%")
-    print(f"  Entry: EMA9 kreuzt EMA21 (5-Min)")
-    print(f"  Filter: 1H EMA Trend")
+    print(f"  S/R Toleranz: {SR_TOLERANCE*100}%  Mindest-Berührungen: {SR_TOUCHES}")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus: {modus}\n")
     load_state()
