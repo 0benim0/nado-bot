@@ -39,13 +39,13 @@ HEADERS     = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 ORDER_SIZE  = 0.0015
 TAKE_PROFIT = 0.5
 STOP_LOSS   = 0.3
-TRAIL_PCT   = 0.2
+TRAIL_PCT   = 0.3
 COOLDOWN    = 2
 
 MIN_CANDLES_5M = 30
 MIN_CANDLES_1H = 50
 INTERVAL       = 30
-DRY_RUN        = True
+DRY_RUN        = False
 STATE_FILE     = "state.json"
 # ═══════════════════════════════════════════════════════════
 
