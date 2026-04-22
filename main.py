@@ -45,7 +45,7 @@ COOLDOWN    = 2
 MIN_CANDLES_5M = 30
 MIN_CANDLES_1H = 50
 INTERVAL       = 30
-DRY_RUN        = False
+DRY_RUN        = True
 STATE_FILE     = "state.json"
 # ═══════════════════════════════════════════════════════════
 
@@ -101,7 +101,8 @@ def get_kerzen(granularity, limit):
         cs = r.json().get("candlesticks", [])
         if not cs: return None
         candles = [{"o": float(c.get("open_x18",0))/1e18, "h": float(c.get("high_x18",0))/1e18,
-                    "l": float(c.get("low_x18",0))/1e18,  "c": float(c.get("close_x18",0))/1e18}
+                    "l": float(c.get("low_x18",0))/1e18,  "c": float(c.get("close_x18",0))/1e18,
+                    "v": float(c.get("volume",0))/1e18}
                    for c in cs]
         return list(reversed(candles))  # älteste zuerst, neueste zuletzt
     except Exception as e:
@@ -130,6 +131,25 @@ def calc_ema(c, n):
     k=2/(n+1); e=sum(c[:n])/n
     for x in c[n:]: e=x*k+e*(1-k)
     return e
+
+def volume_profile(cs):
+    """
+    Berechnet POC (Point of Control) — Preisniveau mit meistem Volumen.
+    Gibt 'LONG' wenn aktueller Preis über POC, 'SHORT' wenn darunter.
+    """
+    if not cs or len(cs) < 10: return None
+    # Volumen pro Preisniveau berechnen
+    vol_map = {}
+    for c in cs:
+        price_level = round((c["h"] + c["l"]) / 2)  # Mitte der Kerze auf  gerundet
+        vol = c.get("v", 0)
+        vol_map[price_level] = vol_map.get(price_level, 0) + vol
+    if not vol_map: return None
+    poc = max(vol_map, key=vol_map.get)  # Preisniveau mit meistem Volumen
+    cur = cs[-1]["c"]
+    if cur > poc: return "LONG"
+    if cur < poc: return "SHORT"
+    return None
 
 def ema_crossover(cs):
     """
@@ -337,12 +357,15 @@ def loop():
                         log(f"BTC {fmt(preis)} | 1H: Seitwärts — warten", Y)
                     time.sleep(INTERVAL); continue
 
-                # Entry: Crossover ODER EMA Richtung stimmt mit 1H Trend überein
-                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG":
-                    log(f"🎯 LONG Signal (1H:{trend} EMA:{ema_dir} Cross:{cross})", M)
+                # Volume Profile berechnen
+                vp = volume_profile(cs_5m)
+
+                # Entry: EMA Richtung + 1H Trend + Volume Profile alle übereinstimmen
+                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG" and vp == "LONG":
+                    log(f"🎯 LONG (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
                     open_pos("LONG", preis)
-                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT":
-                    log(f"🎯 SHORT Signal (1H:{trend} EMA:{ema_dir} Cross:{cross})", M)
+                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT" and vp == "SHORT":
+                    log(f"🎯 SHORT (1H:{trend} EMA:{ema_dir} VP:{vp})", M)
                     open_pos("SHORT", preis)
                 else:
                     if tick % 2 == 0:
@@ -350,7 +373,9 @@ def loop():
                         e9_fmt  = fmt(e9)  if e9  else "?"
                         e21_fmt = fmt(e21) if e21 else "?"
                         cross_txt = f" 🔄{cross}" if cross else ""
-                        log(f"BTC {fmt(preis)} | 1H:{trend_txt} | EMA9:{e9_fmt} EMA21:{e21_fmt}{cross_txt} → warten")
+                        vp_log = volume_profile(cs_5m)
+                        vp_txt = f" VP:{G if vp_log=='LONG' else R}{vp_log}{X}" if vp_log else ""
+                        log(f"BTC {fmt(preis)} | 1H:{trend_txt} | EMA9:{e9_fmt} EMA21:{e21_fmt}{cross_txt}{vp_txt} → warten")
 
             prev_cross = cross
             time.sleep(INTERVAL)
