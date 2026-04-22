@@ -337,12 +337,12 @@ def loop():
                         log(f"BTC {fmt(preis)} | 1H: Seitwärts — warten", Y)
                     time.sleep(INTERVAL); continue
 
-                # Entry nur bei EMA Crossover in Trend-Richtung
-                if cross == "LONG" and trend == "LONG":
-                    log(f"🎯 EMA CROSSOVER: LONG (1H:{trend})", M)
+                # Entry: Crossover ODER EMA Richtung stimmt mit 1H Trend überein
+                if (cross == "LONG" or ema_dir == "LONG") and trend == "LONG":
+                    log(f"🎯 LONG Signal (1H:{trend} EMA:{ema_dir} Cross:{cross})", M)
                     open_pos("LONG", preis)
-                elif cross == "SHORT" and trend == "SHORT":
-                    log(f"🎯 EMA CROSSOVER: SHORT (1H:{trend})", M)
+                elif (cross == "SHORT" or ema_dir == "SHORT") and trend == "SHORT":
+                    log(f"🎯 SHORT Signal (1H:{trend} EMA:{ema_dir} Cross:{cross})", M)
                     open_pos("SHORT", preis)
                 else:
                     if tick % 2 == 0:
