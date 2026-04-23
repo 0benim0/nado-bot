@@ -106,7 +106,7 @@ def sender_hex():
     ab = bytes.fromhex(WALLET_ADDR.lower().replace("0x",""))
     return "0x" + (ab + b"default".ljust(12, b"\x00")).hex()
 
-def place_order(is_buy, price):
+def place_order(is_buy, price, reduce_only=False):
     if DRY_RUN:
         log(f"[DRY] {'BUY' if is_buy else 'SELL'} {ORDER_SIZE} BTC @ {fmt(price)}", Y)
         return True
@@ -117,7 +117,7 @@ def place_order(is_buy, price):
         amt   = int(ORDER_SIZE*1e18) if is_buy else -int(ORDER_SIZE*1e18)
         exp   = int(time.time()) + 60
         nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0,999)
-        apx   = 1
+        apx   = 1 | (1<<11 if reduce_only else 0)
         sndr  = sender_hex()
         dom = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,"verifyingContract":f"0x{PRODUCT_ID:040x}"}
         typ = {"Order":[{"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
@@ -174,12 +174,12 @@ def check_grid(preis):
                     trades += 1
                     save_state()
 
-        # SELL: Preis steigt auf Verkaufslevel eines gekauften Levels
+        # SELL: Preis steigt auf Verkaufslevel — LONG schließen (reduce_only)
         for buy_key, buy_info in list(filled_buys.items()):
             sell_price = buy_info["sell_price"]
             if preis >= sell_price * 0.999:
                 log(f"🔴 GRID SELL @ {fmt(sell_price)} (Gekauft @ {fmt(buy_info['buy_price'])})", R)
-                ok = place_order(False, sell_price)
+                ok = place_order(False, sell_price, reduce_only=True)
                 if ok:
                     pnl = GRID_PROFIT
                     total_pnl += pnl
