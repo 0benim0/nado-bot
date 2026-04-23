@@ -1,12 +1,11 @@
 """
-Nado.xyz Trading Bot — Support/Resistance + EMA + Trend
-=========================================================
-Strategie:
-- 1H Kerzen: Trend Filter (EMA21/EMA50)
-- 5-Min Kerzen: Support/Resistance Levels berechnen
-- Einstieg nur wenn Preis an Support/Resistance + EMA bestätigt
-- Limit Orders 0.1% Slippage
-- TP 1% / SL 0.5% / Trail 0.3%
+Nado.xyz Grid Trading Bot
+==========================
+Strategie: Grid Trading
+- Bot kauft günstig und verkauft teurer automatisch
+- Macht viel Volumen für Nado Airdrop
+- Kein Trend-Filter nötig
+- Funktioniert in jedem Markt
 
 Einrichten:
     SIGNER_KEY = 1-Click Trading Key (app.nado.xyz → Settings)
@@ -27,31 +26,28 @@ except:
 # ═══════════════════════════════════════════════════════════
 #  EINSTELLUNGEN
 # ═══════════════════════════════════════════════════════════
-WALLET_ADDR = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
-SIGNER_KEY  = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"
+WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
+SIGNER_KEY   = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"
 
-PRODUCT_ID  = 2
-CHAIN_ID    = 57073
-GATEWAY     = "https://gateway.prod.nado.xyz/v1"
-ARCHIVE     = "https://archive.prod.nado.xyz/v1"
-HEADERS     = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
+PRODUCT_ID   = 2
+CHAIN_ID     = 57073
+GATEWAY      = "https://gateway.prod.nado.xyz/v1"
+ARCHIVE      = "https://archive.prod.nado.xyz/v1"
+HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
-ORDER_SIZE  = 0.0015
-TAKE_PROFIT = 1.0
-STOP_LOSS   = 0.5
-TRAIL_PCT   = 0.3
-COOLDOWN    = 2
-
-SR_TOLERANCE = 0.002   # 0.2% Toleranz um Support/Resistance Level
-SR_TOUCHES   = 2       # Mindestanzahl Berührungen für gültiges Level
-INTERVAL     = 30
+ORDER_SIZE   = 0.0015   # BTC pro Grid Order
+GRID_LEVELS  = 5        # Anzahl Grid Levels
+GRID_RANGE   = 2.0      # % Range über und unter aktuellem Preis
+GRID_PROFIT  = 0.4      # % Gewinn pro Grid Level
+INTERVAL     = 30       # Sekunden
 DRY_RUN      = False
-STATE_FILE   = "state.json"
+STATE_FILE   = "grid_state.json"
 # ═══════════════════════════════════════════════════════════
 
-pos    = None
-cool   = 0
-trades = wins = loss = 0
+grid        = []    # Liste aller Grid Levels
+filled_buys = {}    # Gekaufte Levels die auf Verkauf warten
+trades      = wins = 0
+total_pnl   = 0.0
 
 
 def ts():    return datetime.now().strftime("%H:%M:%S")
@@ -66,47 +62,27 @@ def fmt(x):
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"pos": pos, "trades": trades, "wins": wins,
-                      "loss": loss, "cool": cool}, f)
+            json.dump({"grid": grid, "filled_buys": filled_buys,
+                      "trades": trades, "wins": wins, "total_pnl": total_pnl}, f)
     except: pass
 
 def load_state():
-    global pos, trades, wins, loss, cool
+    global grid, filled_buys, trades, wins, total_pnl
     try:
         if os.path.exists(STATE_FILE):
             d = json.load(open(STATE_FILE))
-            pos    = d.get("pos")
-            trades = d.get("trades", 0)
-            wins   = d.get("wins", 0)
-            loss   = d.get("loss", 0)
-            cool   = d.get("cool", 0)
-            if pos: log(f"State: {pos['dir']} @ {fmt(pos['entry'])} | {trades}T {wins}W {loss}L", Y)
-            else:   log(f"State: kein Trade | {trades}T {wins}W {loss}L", C)
+            grid        = d.get("grid", [])
+            filled_buys = d.get("filled_buys", {})
+            trades      = d.get("trades", 0)
+            wins        = d.get("wins", 0)
+            total_pnl   = d.get("total_pnl", 0.0)
+            if grid:
+                log(f"State: Grid {fmt(grid[0])} - {fmt(grid[-1])} | {len(filled_buys)} offene Buys | {trades}T P&L:{total_pnl:+.4f}%", Y)
     except Exception as e:
         log(f"State Fehler: {e}", Y)
 
 
 # ─── API ──────────────────────────────────────────────────
-
-def get_kerzen(granularity, limit):
-    try:
-        r = requests.post(
-            ARCHIVE,
-            json={"candlesticks": {"product_id": PRODUCT_ID, "granularity": granularity, "limit": limit}},
-            headers=HEADERS, timeout=15, verify=False
-        )
-        if r.status_code != 200: return None
-        cs = r.json().get("candlesticks", [])
-        if not cs: return None
-        candles = [{"o": float(c.get("open_x18",0))/1e18,
-                    "h": float(c.get("high_x18",0))/1e18,
-                    "l": float(c.get("low_x18",0))/1e18,
-                    "c": float(c.get("close_x18",0))/1e18,
-                    "v": float(c.get("volume",0))/1e18}
-                   for c in cs]
-        return list(reversed(candles))
-    except Exception as e:
-        log(f"Kerzen Fehler: {e}", Y); return None
 
 def get_preis():
     try:
@@ -124,108 +100,24 @@ def get_preis():
     return None
 
 
-# ─── INDIKATOREN ──────────────────────────────────────────
-
-def calc_ema(c, n):
-    if len(c) < n: return None
-    k=2/(n+1); e=sum(c[:n])/n
-    for x in c[n:]: e=x*k+e*(1-k)
-    return e
-
-def trend_1h(cs_1h):
-    """1H Trend Filter."""
-    if not cs_1h or len(cs_1h) < 50: return None
-    cl  = [c["c"] for c in cs_1h]
-    e21 = calc_ema(cl, 21)
-    e50 = calc_ema(cl, 50)
-    cur = cl[-1]
-    if not e21 or not e50: return None
-    last2_bear = cs_1h[-1]["c"] < cs_1h[-1]["o"] and cs_1h[-2]["c"] < cs_1h[-2]["o"]
-    last2_bull = cs_1h[-1]["c"] > cs_1h[-1]["o"] and cs_1h[-2]["c"] > cs_1h[-2]["o"]
-    if cur > e21 and e21 > e50: return "LONG"
-    if cur < e21 and e21 < e50: return "SHORT"
-    if last2_bear and cur < e21: return "SHORT"
-    if last2_bull and cur > e21: return "LONG"
-    return None
-
-def ema_richtung(cs):
-    """EMA9/21 Richtung."""
-    if len(cs) < 25: return None
-    cl  = [c["c"] for c in cs]
-    e9  = calc_ema(cl, 9)
-    e21 = calc_ema(cl, 21)
-    if not e9 or not e21: return None
-    if e9 > e21: return "LONG"
-    if e9 < e21: return "SHORT"
-    return None
-
-def find_sr_levels(cs):
-    """
-    Findet Support und Resistance Levels aus lokalen Hochs/Tiefs.
-    Ein Level ist gültig wenn der Preis mindestens SR_TOUCHES mal
-    innerhalb der SR_TOLERANCE reagiert hat.
-    """
-    if len(cs) < 10: return [], []
-
-    supports    = []
-    resistances = []
-
-    # Lokale Tiefs (Support) und Hochs (Resistance) finden
-    for i in range(2, len(cs)-2):
-        # Lokales Tief — Support
-        if cs[i]["l"] < cs[i-1]["l"] and cs[i]["l"] < cs[i-2]["l"] and \
-           cs[i]["l"] < cs[i+1]["l"] and cs[i]["l"] < cs[i+2]["l"]:
-            supports.append(cs[i]["l"])
-
-        # Lokales Hoch — Resistance
-        if cs[i]["h"] > cs[i-1]["h"] and cs[i]["h"] > cs[i-2]["h"] and \
-           cs[i]["h"] > cs[i+1]["h"] and cs[i]["h"] > cs[i+2]["h"]:
-            resistances.append(cs[i]["h"])
-
-    # Levels gruppieren die nah beieinander sind
-    def group_levels(levels):
-        if not levels: return []
-        levels = sorted(levels)
-        grouped = []
-        current_group = [levels[0]]
-        for level in levels[1:]:
-            if abs(level - current_group[-1]) / current_group[-1] < SR_TOLERANCE:
-                current_group.append(level)
-            else:
-                if len(current_group) >= SR_TOUCHES:
-                    grouped.append(sum(current_group) / len(current_group))
-                current_group = [level]
-        if len(current_group) >= SR_TOUCHES:
-            grouped.append(sum(current_group) / len(current_group))
-        return grouped
-
-    return group_levels(supports), group_levels(resistances)
-
-def preis_an_level(preis, levels, toleranz):
-    """Prüft ob aktueller Preis an einem Level ist."""
-    for level in levels:
-        if abs(preis - level) / level <= toleranz:
-            return level
-    return None
-
-
 # ─── ORDER ────────────────────────────────────────────────
 
 def sender_hex():
     ab = bytes.fromhex(WALLET_ADDR.lower().replace("0x",""))
     return "0x" + (ab + b"default".ljust(12, b"\x00")).hex()
 
-def place_order(is_buy, price, reduce_only=False):
+def place_order(is_buy, price):
     if DRY_RUN:
         log(f"[DRY] {'BUY' if is_buy else 'SELL'} {ORDER_SIZE} BTC @ {fmt(price)}", Y)
         return True
     try:
         from eth_account import Account
+        # Limit Order mit 0.1% Slippage für schnelle Füllung
         px    = round(price * (1.001 if is_buy else 0.999)) * int(1e18)
         amt   = int(ORDER_SIZE*1e18) if is_buy else -int(ORDER_SIZE*1e18)
         exp   = int(time.time()) + 60
         nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0,999)
-        apx   = 1 | (1<<11 if reduce_only else 0)
+        apx   = 1
         sndr  = sender_hex()
         dom = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,"verifyingContract":f"0x{PRODUCT_ID:040x}"}
         typ = {"Order":[{"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
@@ -243,150 +135,97 @@ def place_order(is_buy, price, reduce_only=False):
         d = r.json()
         if d.get("status") == "success":
             log("✅ Order OK!", G); return True
-        code = d.get("error_code","")
-        if code == 2064:
-            log("Position nicht auf Nado — State zurücksetzen", Y); return "RESET"
-        log(f"❌ {d.get('error','')} (Code:{code})", R); return False
+        log(f"❌ {d.get('error','')} (Code:{d.get('error_code','')})", R); return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
 
 
-# ─── POSITION ─────────────────────────────────────────────
+# ─── GRID ─────────────────────────────────────────────────
 
-def open_pos(richtung, preis):
-    global pos, trades, cool
-    is_buy = richtung == "LONG"
-    ok = place_order(is_buy, preis)
-    if not ok and not DRY_RUN: return
-    tp = preis*(1+TAKE_PROFIT/100) if is_buy else preis*(1-TAKE_PROFIT/100)
-    sl = preis*(1-STOP_LOSS/100)   if is_buy else preis*(1+STOP_LOSS/100)
-    pos = {"dir":richtung,"entry":preis,"tp":tp,"sl":sl,
-           "best":preis if is_buy else 0,
-           "worst":preis if not is_buy else float('inf'),
-           "id":trades}
-    trades += 1; cool = 0
+def build_grid(preis):
+    """Baut Grid Levels um aktuellen Preis."""
+    global grid
+    step  = preis * (GRID_RANGE / 100) / GRID_LEVELS
+    lower = preis * (1 - GRID_RANGE/100)
+    grid  = [round(lower + i * step) for i in range(GRID_LEVELS * 2 + 1)]
+    log(f"Grid gebaut: {fmt(grid[0])} bis {fmt(grid[-1])} | {len(grid)} Levels | Step: {fmt(step)}", C)
     save_state()
-    print(f"\n{B}{'═'*55}")
-    print(f"  {'🟢' if is_buy else '🔴'} {G if is_buy else R}POSITION #{pos['id']} — {richtung}{X}")
-    print(f"  Entry:{fmt(preis)}  TP:{fmt(tp)}  SL:{fmt(sl)}  Trail:{TRAIL_PCT}%")
-    if DRY_RUN: print(f"  {Y}[DRY RUN]{X}")
-    print(f"{'═'*55}{X}\n")
 
-def close_pos(grund, preis):
-    global pos, wins, loss, cool
-    if not pos: return
-    is_buy = pos["dir"] != "LONG"
-    ok = place_order(is_buy, preis, reduce_only=False)
-    if ok == "RESET" or (not ok and not DRY_RUN):
-        log("State zurückgesetzt!", Y)
-        pos = None; cool = COOLDOWN; save_state(); return
-    pnl = (preis-pos["entry"])/pos["entry"]*100 if pos["dir"]=="LONG" else (pos["entry"]-preis)/pos["entry"]*100
-    if pnl > 0: wins += 1
-    else: loss += 1
-    wr  = wins/(wins+loss)*100 if (wins+loss)>0 else 0
-    fc  = G if pnl>0 else R; emoji = "✅" if pnl>0 else "❌"
-    print(f"\n{B}{'═'*55}")
-    print(f"  {emoji} POSITION #{pos['id']} GESCHLOSSEN — {grund}")
-    print(f"  Entry:{fmt(pos['entry'])}  Exit:{fmt(preis)}  P&L:{fc}{pnl:+.2f}%{X}")
-    print(f"  {trades} Trades | {wins}W {loss}L | {wr:.0f}% Win Rate")
-    print(f"{'═'*55}{X}\n")
-    pos = None; cool = COOLDOWN
-    save_state()
+def check_grid(preis):
+    """Prüft ob Preis ein Grid Level erreicht hat."""
+    global filled_buys, trades, wins, total_pnl
+
+    if not grid: return
+
+    for level in grid:
+        level_key = str(level)
+
+        # BUY: Preis fällt auf oder unter Grid Level
+        if preis <= level * 1.001 and preis >= level * 0.999:
+            if level_key not in filled_buys:
+                log(f"🟢 GRID BUY @ {fmt(level)} (Preis: {fmt(preis)})", G)
+                ok = place_order(True, level)
+                if ok:
+                    sell_price = level * (1 + GRID_PROFIT/100)
+                    filled_buys[level_key] = {
+                        "buy_price":  level,
+                        "sell_price": round(sell_price),
+                    }
+                    trades += 1
+                    save_state()
+
+        # SELL: Preis steigt auf Verkaufslevel eines gekauften Levels
+        for buy_key, buy_info in list(filled_buys.items()):
+            sell_price = buy_info["sell_price"]
+            if preis >= sell_price * 0.999:
+                log(f"🔴 GRID SELL @ {fmt(sell_price)} (Gekauft @ {fmt(buy_info['buy_price'])})", R)
+                ok = place_order(False, sell_price)
+                if ok:
+                    pnl = GRID_PROFIT
+                    total_pnl += pnl
+                    wins += 1
+                    log(f"✅ Grid Profit: +{pnl}% | Total P&L: {total_pnl:+.2f}% | {wins} Wins", G)
+                    del filled_buys[buy_key]
+                    save_state()
 
 
 # ─── HAUPT LOOP ───────────────────────────────────────────
 
 def loop():
-    global cool
+    global grid
     tick = 0
-    log(f"Bot | S/R + EMA + Trend | TP:{TAKE_PROFIT}% SL:{STOP_LOSS}% Trail:{TRAIL_PCT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
+    log(f"Grid Bot | BTC | Range:±{GRID_RANGE}% | Levels:{GRID_LEVELS} | Profit/Level:{GRID_PROFIT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
 
     while True:
         try:
             tick += 1
-
-            # Daten holen
             preis = get_preis()
-            cs_5m = get_kerzen(300,  100)
-            cs_1h = get_kerzen(3600, 100)
 
-            if not preis or not cs_5m or not cs_1h:
-                log("Daten fehlen — warte...", Y)
+            if not preis:
+                log("Kein Preis — warte...", Y)
                 time.sleep(INTERVAL); continue
 
-            # Indikatoren berechnen
-            trend   = trend_1h(cs_1h)
-            ema_dir = ema_richtung(cs_5m)
-            supports, resistances = find_sr_levels(cs_5m)
+            # Grid aufbauen wenn noch keins existiert oder Preis zu weit vom Grid entfernt
+            if not grid or preis < grid[0] * 0.97 or preis > grid[-1] * 1.03:
+                log(f"Grid wird neu aufgebaut @ {fmt(preis)}", Y)
+                filled_buys.clear()
+                build_grid(preis)
 
-            # Preis an Support oder Resistance?
-            at_support    = preis_an_level(preis, supports,    SR_TOLERANCE)
-            at_resistance = preis_an_level(preis, resistances, SR_TOLERANCE)
+            # Grid prüfen
+            check_grid(preis)
 
-            if pos:
-                is_long = pos["dir"] == "LONG"
-                pnl = (preis-pos["entry"])/pos["entry"]*100 if is_long else (pos["entry"]-preis)/pos["entry"]*100
-                fc  = G if pnl>0 else R
-
-                if is_long:
-                    pos["best"]  = max(pos["best"], preis)
-                    trail        = pos["best"] * (1 - TRAIL_PCT/100)
-                else:
-                    pos["worst"] = min(pos["worst"], preis)
-                    trail        = pos["worst"] * (1 + TRAIL_PCT/100)
-
-                trend_txt = f"{G}↑{X}" if trend=="LONG" else (f"{R}↓{X}" if trend=="SHORT" else f"{Y}→{X}")
-                log(f"#{pos['id']} {pos['dir']} | {fmt(pos['entry'])}→{fmt(preis)} | P&L:{fc}{pnl:+.2f}%{X} | Trail:{fmt(trail)} | 1H:{trend_txt}")
-                save_state()
-
-                if (is_long and preis >= pos["tp"]) or (not is_long and preis <= pos["tp"]):
-                    close_pos("TAKE PROFIT ✅", preis)
-                elif (is_long and preis <= pos["sl"]) or (not is_long and preis >= pos["sl"]):
-                    close_pos("STOP LOSS ❌", preis)
-                elif (is_long and preis <= trail) or (not is_long and preis >= trail):
-                    close_pos("TRAILING STOP 📉", preis)
-                # EMA dreht gegen Position → schließen
-                elif ema_dir == "SHORT" and is_long and trend == "SHORT":
-                    close_pos("EMA + TREND UMKEHRUNG 🔄", preis)
-                elif ema_dir == "LONG" and not is_long and trend == "LONG":
-                    close_pos("EMA + TREND UMKEHRUNG 🔄", preis)
-
-            else:
-                if cool > 0:
-                    cool -= 1
-                    log(f"Cooldown: {cool} | BTC {fmt(preis)}", Y)
-                    time.sleep(INTERVAL); continue
-
-                if not trend:
-                    if tick % 3 == 0:
-                        log(f"BTC {fmt(preis)} | 1H: Seitwärts — kein Trade", Y)
-                    time.sleep(INTERVAL); continue
-
-                # S/R Level Info
-                sr_txt = ""
-                if at_support:    sr_txt = f" {G}@ Support {fmt(at_support)}{X}"
-                if at_resistance: sr_txt = f" {R}@ Resistance {fmt(at_resistance)}{X}"
-
-                # Entry Bedingungen:
-                # LONG: 1H LONG + EMA LONG + Preis an Support
-                # SHORT: 1H SHORT + EMA SHORT + Preis an Resistance
-                if trend == "LONG" and ema_dir == "LONG" and at_support:
-                    log(f"🎯 LONG @ Support {fmt(at_support)} (1H:{trend} EMA:{ema_dir})", M)
-                    open_pos("LONG", preis)
-                elif trend == "SHORT" and ema_dir == "SHORT" and at_resistance:
-                    log(f"🎯 SHORT @ Resistance {fmt(at_resistance)} (1H:{trend} EMA:{ema_dir})", M)
-                    open_pos("SHORT", preis)
-                else:
-                    if tick % 2 == 0:
-                        trend_txt = f"{G}LONG{X}" if trend=="LONG" else f"{R}SHORT{X}"
-                        sr_info   = f" S:{len(supports)} R:{len(resistances)} Levels"
-                        log(f"BTC {fmt(preis)} | 1H:{trend_txt} | EMA:{ema_dir}{sr_txt}{sr_info} → warten")
+            # Status anzeigen
+            if tick % 3 == 0:
+                grid_min = fmt(grid[0])  if grid else "?"
+                grid_max = fmt(grid[-1]) if grid else "?"
+                log(f"BTC {fmt(preis)} | Grid: {grid_min}-{grid_max} | Offene Buys: {len(filled_buys)} | Wins: {wins} | P&L: {total_pnl:+.2f}%")
 
             time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
             log("Bot gestoppt.", Y)
-            if pos: log(f"⚠️ OFFENE POSITION: {pos['dir']} @ {fmt(pos['entry'])} — MANUELL SCHLIESSEN!", R)
+            if filled_buys:
+                log(f"⚠️ {len(filled_buys)} offene Buy Orders — bitte manuell auf app.nado.xyz schließen!", R)
             break
         except Exception as e:
             log(f"Fehler: {e}", R); time.sleep(5)
@@ -394,14 +233,16 @@ def loop():
 
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
-    print(f"  ║   Nado.xyz — Support/Resistance Bot      ║")
-    print(f"  ║  1H Trend + EMA + S/R Levels + Trail     ║")
+    print(f"  ║      Nado.xyz — Grid Trading Bot         ║")
+    print(f"  ║   Kaufe günstig, verkaufe teurer         ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
-    print(f"  Wallet: {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
-    print(f"  TP:{TAKE_PROFIT}%  SL:{STOP_LOSS}%  Trail:{TRAIL_PCT}%")
-    print(f"  S/R Toleranz: {SR_TOLERANCE*100}%  Mindest-Berührungen: {SR_TOUCHES}")
+    print(f"  Wallet:       {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
+    print(f"  Grid Range:   ±{GRID_RANGE}%")
+    print(f"  Grid Levels:  {GRID_LEVELS}")
+    print(f"  Profit/Level: +{GRID_PROFIT}%")
+    print(f"  Order Size:   {ORDER_SIZE} BTC")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
-    print(f"  Modus: {modus}\n")
+    print(f"  Modus:        {modus}\n")
     load_state()
     loop()
 
