@@ -230,11 +230,13 @@ def loop():
                 log(f"Grid wird aufgebaut @ {fmt(preis)}", Y)
                 setup_grid(preis)
 
-            # Wenn alle Levels verkauft sind → neu aufbauen
-            all_sold = all(not v["filled"] for v in buy_levels.values())
-            if all_sold and wins > 0 and tick > 10:
-                log(f"Alle Levels verkauft! Grid neu aufbauen @ {fmt(preis)}", Y)
-                setup_grid(preis)
+            # Nur neu aufbauen wenn Preis ÜBER allen Buy Levels ist
+            # Das bedeutet alle Positionen wurden profitabel geschlossen
+            if buy_levels and wins > 0:
+                highest_buy = max(float(k) for k in buy_levels.keys())
+                if preis > highest_buy * 1.005 and total_size == 0:
+                    log(f"Alle Levels profitabel geschlossen! Neu aufbauen @ {fmt(preis)}", Y)
+                    setup_grid(preis)
 
             # Grid prüfen
             check_grid(preis)
