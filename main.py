@@ -136,8 +136,10 @@ def place_order(is_buy, price, reduce_only=False):
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            log("✅ Order OK!", G); return True
-        log(f"❌ {d.get('error','')} (Code:{d.get('error_code','')})", R); return False
+            log(f"✅ Order OK! Digest:{d.get('data',{}).get('digest','')[:16]}", G); return True
+        log(f"❌ {d.get('error','')} (Code:{d.get('error_code','')})", R)
+        log(f"Full response: {d}", R)
+        return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
 
