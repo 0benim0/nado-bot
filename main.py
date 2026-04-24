@@ -1,11 +1,11 @@
 """
-Nado.xyz Grid Trading Bot
-==========================
-Strategie: Grid Trading
-- Bot kauft günstig und verkauft teurer automatisch
-- Macht viel Volumen für Nado Airdrop
-- Kein Trend-Filter nötig
-- Funktioniert in jedem Markt
+Nado.xyz Grid Trading Bot — Perps Edition
+==========================================
+Korrekte Grid Logik für Perpetuals:
+- Eine Position, mehrere Levels
+- Kaufe günstig → verkaufe teurer
+- Positionsgröße wächst beim Rückgang
+- Positionsgröße schrumpft beim Anstieg
 
 Einrichten:
     SIGNER_KEY = 1-Click Trading Key (app.nado.xyz → Settings)
@@ -35,20 +35,21 @@ GATEWAY      = "https://gateway.prod.nado.xyz/v1"
 ARCHIVE      = "https://archive.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
-ORDER_SIZE   = 0.0015   # BTC pro Grid Order
-GRID_LEVELS  = 5        # Anzahl Grid Levels
-GRID_RANGE   = 2.0      # % Range über und unter aktuellem Preis
-GRID_PROFIT  = 0.4      # % Gewinn pro Grid Level
-INTERVAL     = 30       # Sekunden
+ORDER_SIZE   = 0.0015   # BTC pro Grid Level
+GRID_LEVELS  = 5        # Anzahl Buy Levels
+GRID_STEP    = 0.4      # % Abstand zwischen Levels
+GRID_PROFIT  = 0.4      # % Gewinn pro Level
+INTERVAL     = 30
 DRY_RUN      = False
 STATE_FILE   = "grid_state.json"
 # ═══════════════════════════════════════════════════════════
 
-grid             = []    # Liste aller Grid Levels
-filled_buys      = {}    # Gekaufte Levels die auf Verkauf warten
-grid_start_preis = 0     # Startpreis beim Grid Aufbau
-trades      = wins = 0
-total_pnl   = 0.0
+# Grid State
+buy_levels   = {}   # {preis: {"size": 0.0015, "sell_at": preis*1.004, "filled": False}}
+total_size   = 0.0  # Gesamte offene Position in BTC
+wins         = 0
+total_pnl    = 0.0
+grid_center  = 0.0
 
 
 def ts():    return datetime.now().strftime("%H:%M:%S")
@@ -63,23 +64,23 @@ def fmt(x):
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"grid": grid, "filled_buys": filled_buys, "grid_start_preis": grid_start_preis,
-                      "trades": trades, "wins": wins, "total_pnl": total_pnl}, f)
+            json.dump({"buy_levels": buy_levels, "total_size": total_size,
+                      "wins": wins, "total_pnl": total_pnl, "grid_center": grid_center}, f)
     except: pass
 
 def load_state():
-    global grid, filled_buys, trades, wins, total_pnl
+    global buy_levels, total_size, wins, total_pnl, grid_center
     try:
         if os.path.exists(STATE_FILE):
             d = json.load(open(STATE_FILE))
-            grid             = d.get("grid", [])
-            filled_buys      = d.get("filled_buys", {})
-            grid_start_preis = d.get("grid_start_preis", 0)
-            trades      = d.get("trades", 0)
+            buy_levels  = d.get("buy_levels", {})
+            total_size  = d.get("total_size", 0.0)
             wins        = d.get("wins", 0)
             total_pnl   = d.get("total_pnl", 0.0)
-            if grid:
-                log(f"State: Grid {fmt(grid[0])} - {fmt(grid[-1])} | {len(filled_buys)} offene Buys | {trades}T P&L:{total_pnl:+.4f}%", Y)
+            grid_center = d.get("grid_center", 0.0)
+            if buy_levels:
+                filled = sum(1 for v in buy_levels.values() if v["filled"])
+                log(f"State: {filled} offene Positionen | Größe:{total_size:.4f} BTC | {wins}W P&L:{total_pnl:+.2f}%", Y)
     except Exception as e:
         log(f"State Fehler: {e}", Y)
 
@@ -108,15 +109,14 @@ def sender_hex():
     ab = bytes.fromhex(WALLET_ADDR.lower().replace("0x",""))
     return "0x" + (ab + b"default".ljust(12, b"\x00")).hex()
 
-def place_order(is_buy, price, reduce_only=False):
+def place_order(is_buy, price, size=ORDER_SIZE, reduce_only=False):
     if DRY_RUN:
-        log(f"[DRY] {'BUY' if is_buy else 'SELL'} {ORDER_SIZE} BTC @ {fmt(price)}", Y)
+        log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
         return True
     try:
         from eth_account import Account
-        # Limit Order mit 0.1% Slippage für schnelle Füllung
         px    = round(price * (1.001 if is_buy else 0.999)) * int(1e18)
-        amt   = int(ORDER_SIZE*1e18) if is_buy else -int(ORDER_SIZE*1e18)
+        amt   = int(size*1e18) if is_buy else -int(size*1e18)
         exp   = int(time.time()) + 60
         nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0,999)
         apx   = 1 | (1<<11 if reduce_only else 0)
@@ -136,9 +136,11 @@ def place_order(is_buy, price, reduce_only=False):
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            log(f"✅ Order OK! Digest:{d.get('data',{}).get('digest','')[:16]}", G); return True
-        log(f"❌ {d.get('error','')} (Code:{d.get('error_code','')})", R)
-        log(f"Full response: {d}", R)
+            log(f"✅ OK! Digest:{d.get('data',{}).get('digest','')[:16]}", G)
+            return True
+        err  = d.get("error", "")
+        code = d.get("error_code", 0)
+        log(f"❌ {err} (Code:{code})", R)
         return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
@@ -146,70 +148,71 @@ def place_order(is_buy, price, reduce_only=False):
 
 # ─── GRID ─────────────────────────────────────────────────
 
-def build_grid(preis):
-    """Baut Grid Levels um aktuellen Preis.
-    Levels UNTER Startpreis = BUY Zone
-    Levels UBER Startpreis  = SELL Zone
-    """
-    global grid, grid_start_preis
-    step  = preis * (GRID_RANGE / 100) / GRID_LEVELS
-    lower = preis * (1 - GRID_RANGE/100)
-    grid  = [round(lower + i * step) for i in range(GRID_LEVELS * 2 + 1)]
-    grid_start_preis = round(preis)
-    log(f"Grid gebaut @ {fmt(preis)} | {fmt(grid[0])} bis {fmt(grid[-1])} | Step:{fmt(step)}", C)
-    log(f"BUY Zone: unter {fmt(grid_start_preis)} | SELL Zone: über {fmt(grid_start_preis)}", C)
+def setup_grid(preis):
+    """Erstellt Grid Levels unter aktuellem Preis."""
+    global buy_levels, grid_center, total_size
+    buy_levels  = {}
+    total_size  = 0.0
+    grid_center = round(preis)
+
+    # Erstelle GRID_LEVELS Kauf-Levels unter dem aktuellen Preis
+    for i in range(1, GRID_LEVELS + 1):
+        buy_price  = round(preis * (1 - i * GRID_STEP / 100))
+        sell_price = round(buy_price * (1 + GRID_PROFIT / 100))
+        buy_levels[str(buy_price)] = {
+            "buy_price":  buy_price,
+            "sell_price": sell_price,
+            "size":       ORDER_SIZE,
+            "filled":     False
+        }
+
+    levels_str = " | ".join([fmt(float(k)) for k in sorted(buy_levels.keys(), key=float)])
+    log(f"Grid @ {fmt(preis)} | Buy Levels: {levels_str}", C)
     save_state()
 
 def check_grid(preis):
-    """Prüft ob Preis ein Grid Level erreicht hat."""
-    global filled_buys, trades, wins, total_pnl
+    """Prüft Grid Levels und führt Orders aus."""
+    global total_size, wins, total_pnl
 
-    if not grid: return
+    # BUY: Preis fällt auf ein Level
+    for key, level in buy_levels.items():
+        buy_price = level["buy_price"]
 
-    for level in grid:
-        level_key = str(level)
+        # Noch nicht gekauft und Preis ist am Level
+        if not level["filled"] and abs(preis - buy_price) / buy_price <= 0.002:
+            log(f"🟢 BUY @ {fmt(buy_price)} | Verkaufe bei {fmt(level['sell_price'])}", G)
+            ok = place_order(True, buy_price, size=ORDER_SIZE)
+            if ok:
+                level["filled"] = True
+                total_size += ORDER_SIZE
+                save_state()
+                time.sleep(2)  # Kurz warten zwischen Orders
+            break  # Nur ein Buy pro Tick
 
-        # BUY: nur bei Levels UNTER dem Startpreis kaufen
-        if level <= grid_start_preis and preis <= level * 1.001 and preis >= level * 0.999:
-            if level_key not in filled_buys:
-                log(f"🟢 GRID BUY @ {fmt(level)} (Preis: {fmt(preis)})", G)
-                ok = place_order(True, level)
-                if ok:
-                    sell_price = level * (1 + GRID_PROFIT/100)
-                    filled_buys[level_key] = {
-                        "buy_price":  level,
-                        "sell_price": round(sell_price),
-                    }
-                    trades += 1
-                    save_state()
-
-        # SELL: Preis steigt auf Verkaufslevel — nur EIN Sell pro Tick
-        for buy_key, buy_info in list(filled_buys.items()):
-            sell_price = buy_info["sell_price"]
-            if preis >= sell_price * 0.999:
-                log(f"🔴 GRID SELL @ {fmt(sell_price)} (Gekauft @ {fmt(buy_info['buy_price'])})", R)
-                ok = place_order(False, sell_price, reduce_only=True)
-                if ok:
-                    pnl = GRID_PROFIT
-                    total_pnl += pnl
-                    wins += 1
-                    log(f"✅ Grid Profit: +{pnl}% | Total P&L: {total_pnl:+.2f}% | {wins} Wins", G)
-                    del filled_buys[buy_key]
-                    save_state()
-                    break  # Nur ein Sell pro Tick — kein Code 2064 mehr
-                elif "2064" in str(ok):
-                    # Position existiert nicht mehr — State bereinigen
-                    del filled_buys[buy_key]
-                    save_state()
-                    break
+    # SELL: Preis steigt auf einen Verkaufslevel
+    for key, level in list(buy_levels.items()):
+        if level["filled"] and preis >= level["sell_price"] * 0.999:
+            log(f"🔴 SELL @ {fmt(level['sell_price'])} | Gekauft @ {fmt(level['buy_price'])}", R)
+            ok = place_order(False, level["sell_price"], size=ORDER_SIZE, reduce_only=True)
+            if ok:
+                pnl = GRID_PROFIT
+                total_pnl += pnl
+                wins += 1
+                total_size -= ORDER_SIZE
+                if total_size < 0: total_size = 0
+                level["filled"] = False  # Level wieder verfügbar für nächsten Kauf
+                log(f"✅ +{pnl}% | Total: {total_pnl:+.2f}% | {wins} Wins | Pos: {total_size:.4f} BTC", G)
+                save_state()
+                time.sleep(2)
+            break  # Nur ein Sell pro Tick
 
 
 # ─── HAUPT LOOP ───────────────────────────────────────────
 
 def loop():
-    global grid
+    global buy_levels, total_size
     tick = 0
-    log(f"Grid Bot | BTC | Range:±{GRID_RANGE}% | Levels:{GRID_LEVELS} | Profit/Level:{GRID_PROFIT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
+    log(f"Grid Bot | BTC | Step:{GRID_STEP}% | Profit:{GRID_PROFIT}% | {'DRY RUN' if DRY_RUN else 'LIVE'}", C)
 
     while True:
         try:
@@ -217,33 +220,40 @@ def loop():
             preis = get_preis()
 
             if not preis:
-                log("Kein Preis — warte...", Y)
+                log("Kein Preis", Y)
                 time.sleep(INTERVAL); continue
 
-            # Grid aufbauen wenn noch keins existiert oder Preis zu weit vom Grid entfernt
-            if not grid or preis < grid[0] * 0.97 or preis > grid[-1] * 1.03:
-                log(f"Grid wird neu aufgebaut @ {fmt(preis)}", Y)
-                filled_buys.clear()
-                build_grid(preis)
+            # Grid neu aufbauen wenn:
+            # 1. Noch kein Grid vorhanden
+            # 2. Preis zu weit nach oben (alle verkauft, neu starten)
+            if not buy_levels:
+                log(f"Grid wird aufgebaut @ {fmt(preis)}", Y)
+                setup_grid(preis)
+
+            # Wenn alle Levels verkauft sind → neu aufbauen
+            all_sold = all(not v["filled"] for v in buy_levels.values())
+            if all_sold and wins > 0 and tick > 10:
+                log(f"Alle Levels verkauft! Grid neu aufbauen @ {fmt(preis)}", Y)
+                setup_grid(preis)
 
             # Grid prüfen
             check_grid(preis)
 
-            # Status anzeigen
+            # Status
             if tick % 3 == 0:
-                grid_min = fmt(grid[0])  if grid else "?"
-                grid_max = fmt(grid[-1]) if grid else "?"
-                log(f"BTC {fmt(preis)} | Grid: {grid_min}-{grid_max} | Offene Buys: {len(filled_buys)} | Wins: {wins} | P&L: {total_pnl:+.2f}%")
+                filled = sum(1 for v in buy_levels.values() if v["filled"])
+                log(f"BTC {fmt(preis)} | Offen:{filled}/{GRID_LEVELS} | Pos:{total_size:.4f} BTC | Wins:{wins} | P&L:{total_pnl:+.2f}%")
 
             time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
             log("Bot gestoppt.", Y)
-            if filled_buys:
-                log(f"⚠️ {len(filled_buys)} offene Buy Orders — bitte manuell auf app.nado.xyz schließen!", R)
+            if total_size > 0:
+                log(f"⚠️ Offene Position: {total_size:.4f} BTC — manuell auf app.nado.xyz schließen!", R)
             break
         except Exception as e:
-            log(f"Fehler: {e}", R); time.sleep(5)
+            log(f"Fehler: {e}", R)
+            time.sleep(5)
 
 
 def main():
@@ -251,13 +261,13 @@ def main():
     print(f"  ║      Nado.xyz — Grid Trading Bot         ║")
     print(f"  ║   Kaufe günstig, verkaufe teurer         ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
-    print(f"  Wallet:       {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
-    print(f"  Grid Range:   ±{GRID_RANGE}%")
-    print(f"  Grid Levels:  {GRID_LEVELS}")
-    print(f"  Profit/Level: +{GRID_PROFIT}%")
-    print(f"  Order Size:   {ORDER_SIZE} BTC")
+    print(f"  Wallet:      {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
+    print(f"  Grid Step:   {GRID_STEP}% zwischen Levels")
+    print(f"  Grid Levels: {GRID_LEVELS}")
+    print(f"  Profit:      +{GRID_PROFIT}% pro Level")
+    print(f"  Order Size:  {ORDER_SIZE} BTC")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
-    print(f"  Modus:        {modus}\n")
+    print(f"  Modus:       {modus}\n")
     load_state()
     loop()
 
