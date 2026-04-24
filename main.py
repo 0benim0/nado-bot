@@ -149,14 +149,23 @@ def place_order(is_buy, price, size=ORDER_SIZE, reduce_only=False):
 # ─── GRID ─────────────────────────────────────────────────
 
 def setup_grid(preis):
-    """Erstellt Grid Levels unter aktuellem Preis."""
+    """Erstellt Grid Levels — Level 0 = aktueller Preis, Rest darunter."""
     global buy_levels, grid_center, total_size
     buy_levels  = {}
     total_size  = 0.0
     grid_center = round(preis)
 
-    # Erstelle GRID_LEVELS Kauf-Levels unter dem aktuellen Preis
-    for i in range(1, GRID_LEVELS + 1):
+    # Level 0: aktueller Preis (sofort kaufen)
+    sell_price_0 = round(preis * (1 + GRID_PROFIT / 100))
+    buy_levels[str(round(preis))] = {
+        "buy_price":  round(preis),
+        "sell_price": sell_price_0,
+        "size":       ORDER_SIZE,
+        "filled":     False
+    }
+
+    # Level 1-4: darunter
+    for i in range(1, GRID_LEVELS):
         buy_price  = round(preis * (1 - i * GRID_STEP / 100))
         sell_price = round(buy_price * (1 + GRID_PROFIT / 100))
         buy_levels[str(buy_price)] = {
@@ -166,8 +175,8 @@ def setup_grid(preis):
             "filled":     False
         }
 
-    levels_str = " | ".join([fmt(float(k)) for k in sorted(buy_levels.keys(), key=float)])
-    log(f"Grid @ {fmt(preis)} | Buy Levels: {levels_str}", C)
+    levels_str = " | ".join([fmt(float(k)) for k in sorted(buy_levels.keys(), key=float, reverse=True)])
+    log(f"Grid @ {fmt(preis)} | Levels: {levels_str}", C)
     save_state()
 
 def check_grid(preis):
