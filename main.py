@@ -44,8 +44,9 @@ DRY_RUN      = False
 STATE_FILE   = "grid_state.json"
 # ═══════════════════════════════════════════════════════════
 
-grid        = []    # Liste aller Grid Levels
-filled_buys = {}    # Gekaufte Levels die auf Verkauf warten
+grid             = []    # Liste aller Grid Levels
+filled_buys      = {}    # Gekaufte Levels die auf Verkauf warten
+grid_start_preis = 0     # Startpreis beim Grid Aufbau
 trades      = wins = 0
 total_pnl   = 0.0
 
@@ -62,7 +63,7 @@ def fmt(x):
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"grid": grid, "filled_buys": filled_buys,
+            json.dump({"grid": grid, "filled_buys": filled_buys, "grid_start_preis": grid_start_preis,
                       "trades": trades, "wins": wins, "total_pnl": total_pnl}, f)
     except: pass
 
@@ -71,8 +72,9 @@ def load_state():
     try:
         if os.path.exists(STATE_FILE):
             d = json.load(open(STATE_FILE))
-            grid        = d.get("grid", [])
-            filled_buys = d.get("filled_buys", {})
+            grid             = d.get("grid", [])
+            filled_buys      = d.get("filled_buys", {})
+            grid_start_preis = d.get("grid_start_preis", 0)
             trades      = d.get("trades", 0)
             wins        = d.get("wins", 0)
             total_pnl   = d.get("total_pnl", 0.0)
@@ -143,12 +145,17 @@ def place_order(is_buy, price, reduce_only=False):
 # ─── GRID ─────────────────────────────────────────────────
 
 def build_grid(preis):
-    """Baut Grid Levels um aktuellen Preis."""
-    global grid
+    """Baut Grid Levels um aktuellen Preis.
+    Levels UNTER Startpreis = BUY Zone
+    Levels UBER Startpreis  = SELL Zone
+    """
+    global grid, grid_start_preis
     step  = preis * (GRID_RANGE / 100) / GRID_LEVELS
     lower = preis * (1 - GRID_RANGE/100)
     grid  = [round(lower + i * step) for i in range(GRID_LEVELS * 2 + 1)]
-    log(f"Grid gebaut: {fmt(grid[0])} bis {fmt(grid[-1])} | {len(grid)} Levels | Step: {fmt(step)}", C)
+    grid_start_preis = round(preis)
+    log(f"Grid gebaut @ {fmt(preis)} | {fmt(grid[0])} bis {fmt(grid[-1])} | Step:{fmt(step)}", C)
+    log(f"BUY Zone: unter {fmt(grid_start_preis)} | SELL Zone: über {fmt(grid_start_preis)}", C)
     save_state()
 
 def check_grid(preis):
@@ -160,8 +167,8 @@ def check_grid(preis):
     for level in grid:
         level_key = str(level)
 
-        # BUY: Preis fällt auf oder unter Grid Level
-        if preis <= level * 1.001 and preis >= level * 0.999:
+        # BUY: nur bei Levels UNTER dem Startpreis kaufen
+        if level <= grid_start_preis and preis <= level * 1.001 and preis >= level * 0.999:
             if level_key not in filled_buys:
                 log(f"🟢 GRID BUY @ {fmt(level)} (Preis: {fmt(preis)})", G)
                 ok = place_order(True, level)
@@ -174,7 +181,7 @@ def check_grid(preis):
                     trades += 1
                     save_state()
 
-        # SELL: Preis steigt auf Verkaufslevel — LONG schließen (reduce_only)
+        # SELL: Preis steigt auf Verkaufslevel — nur EIN Sell pro Tick
         for buy_key, buy_info in list(filled_buys.items()):
             sell_price = buy_info["sell_price"]
             if preis >= sell_price * 0.999:
@@ -187,6 +194,12 @@ def check_grid(preis):
                     log(f"✅ Grid Profit: +{pnl}% | Total P&L: {total_pnl:+.2f}% | {wins} Wins", G)
                     del filled_buys[buy_key]
                     save_state()
+                    break  # Nur ein Sell pro Tick — kein Code 2064 mehr
+                elif "2064" in str(ok):
+                    # Position existiert nicht mehr — State bereinigen
+                    del filled_buys[buy_key]
+                    save_state()
+                    break
 
 
 # ─── HAUPT LOOP ───────────────────────────────────────────
