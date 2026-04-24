@@ -103,6 +103,42 @@ def get_preis():
     return None
 
 
+# ─── NADO SYNC ───────────────────────────────────────────
+
+SUBACCOUNT = '0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000'
+
+def get_nado_position():
+    """Holt echte Position von Nado API."""
+    try:
+        url = f"{GATEWAY}/query?type=subaccount_info&subaccount={SUBACCOUNT}"
+        r = requests.get(url, headers={"Accept-Encoding": "gzip"}, timeout=15, verify=False)
+        if r.status_code != 200: return None
+        data = r.json().get("data", {})
+        for pb in data.get("perp_balances", []):
+            if pb.get("product_id") == PRODUCT_ID:
+                amt = float(pb["balance"]["amount"]) / 1e18
+                return amt  # positiv = LONG, negativ = SHORT, 0 = kein Trade
+    except Exception as e:
+        log(f"Sync Fehler: {e}", Y)
+    return None
+
+def sync_mit_nado():
+    """Synchronisiert Bot-State mit echter Nado Position."""
+    global total_size, buy_levels
+    nado_pos = get_nado_position()
+    if nado_pos is None:
+        return
+    nado_size = abs(nado_pos)
+    if abs(nado_size - total_size) > 0.0001:
+        log(f"⚠️ Sync: Bot={total_size:.4f} BTC, Nado={nado_size:.4f} BTC — korrigiere!", Y)
+        total_size = nado_size
+        if nado_size == 0:
+            # Alle Positionen auf Nado geschlossen — Bot State zurücksetzen
+            for key in buy_levels:
+                buy_levels[key]["filled"] = False
+            log("State zurückgesetzt — kein offener Trade auf Nado", Y)
+        save_state()
+
 # ─── ORDER ────────────────────────────────────────────────
 
 def sender_hex():
@@ -247,6 +283,10 @@ def loop():
                     log(f"Alle Levels profitabel geschlossen! Neu aufbauen @ {fmt(preis)}", Y)
                     setup_grid(preis)
 
+            # Sync mit Nado alle 5 Ticks
+            if tick % 5 == 0:
+                sync_mit_nado()
+
             # Grid prüfen
             check_grid(preis)
 
@@ -280,6 +320,8 @@ def main():
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:       {modus}\n")
     load_state()
+    log("Synchronisiere mit Nado...", C)
+    sync_mit_nado()
     loop()
 
 
