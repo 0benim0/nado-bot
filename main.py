@@ -249,7 +249,7 @@ def loop():
                 for lv in grid:
                     if not lv["filled"]:
                         diff = abs(preis - lv["buy_price"]) / lv["buy_price"]
-                        if diff <= 0.004:  # 0.4% Toleranz
+                        if preis <= lv["buy_price"] * 1.001:  # Nur wenn Preis am oder unter Level
                             log(f"🟢 BUY @ {fmt(lv['buy_price'])} | TP: {fmt(lv['sell_price'])}", G)
                             ok = place_order(True, preis)
                             if ok:
@@ -265,7 +265,7 @@ def loop():
                         # Mindestens 60 Sek nach Kauf warten
                         if (time.time() - lv["bought_at"]) < 60:
                             continue
-                        if preis >= lv["sell_price"] * 0.998:
+                        if preis >= lv["sell_price"]:  # Exakt am Sell Level
                             log(f"🔴 SELL @ {fmt(lv['sell_price'])} | Gekauft @ {fmt(lv['buy_price'])}", R)
                             ok = place_order(False, preis)
                             if ok:
