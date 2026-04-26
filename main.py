@@ -54,6 +54,7 @@ wins          = 0
 total_pnl     = 0.0
 prev_preis    = None
 last_order_t  = 0.0    # Zeit der letzten Order (für Sync-Delay)
+grid_built_at = 0.0    # Zeit des letzten Grid-Aufbaus
 just_bought   = False  # Verhindert Sell im gleichen Tick wie Buy
 
 
@@ -256,7 +257,7 @@ def sell(price, size):
 # ─── GRID ─────────────────────────────────────────────────
 
 def build_grid(preis):
-    global grid
+    global grid, grid_built_at
     grid = []
     for i in range(1, GRID_LEVELS + 1):
         buy_p  = round(preis * (1 - i * GRID_STEP / 100))
@@ -269,6 +270,7 @@ def build_grid(preis):
         })
     lvls = " | ".join(fmt(lv["buy_price"]) for lv in grid)
     log(f"Grid @ {fmt(preis)} | Levels: {lvls}", C)
+    grid_built_at = time.time()
     log(f"SL wenn BTC unter {fmt(grid[-1]['buy_price'] * (1 - SL_PCT/100))}", Y)
 
 
@@ -321,7 +323,7 @@ def sync_nado(preis):
 # ─── HAUPT LOOP ───────────────────────────────────────────
 
 def loop():
-    global prev_preis, zustand, just_bought, wins, total_pnl
+    global prev_preis, zustand, just_bought, wins, total_pnl, grid_built_at
 
     tick = 0
     log(f"Bot | Grid+SL+Signal | DRY={'JA' if DRY_RUN else 'NEIN'}", C)
@@ -367,7 +369,9 @@ def loop():
             # ── ZUSTAND: GRID ─────────────────────────────
 
             # Grid neu aufbauen nur wenn Preis ÜBER dem höchsten Level ist (BTC stieg über alle Levels)
-            if filled_count() == 0 and grid and preis > grid[0]["buy_price"] * 1.002:
+            # Nur neu aufbauen wenn ALLE levels verkauft wurden (min 1 win) UND preis deutlich über grid
+            filled_ever = any(lv["bought_at"] > 0 for lv in grid)
+            if filled_count() == 0 and filled_ever and preis > grid[0]["buy_price"] * 1.002:
                 log(f"Alle Levels verkauft — neues Grid @ {fmt(preis)}", C)
                 build_grid(preis)
 
