@@ -272,6 +272,12 @@ def build_grid(preis):
     log(f"Grid @ {fmt(preis)} | Levels: {lvls}", C)
     grid_built_at = time.time()
     log(f"SL wenn BTC unter {fmt(grid[-1]['buy_price'] * (1 - SL_PCT/100))}", Y)
+    # Sofort kaufen beim Grid-Aufbau
+    log(f"🟢 Sofortkauf @ {fmt(preis)}", G)
+    ok = buy(preis)
+    if ok:
+        sell_p = round(preis * (1 + GRID_PROFIT / 100))
+        grid.insert(0, {"buy_price": round(preis), "sell_price": sell_p, "filled": True, "bought_at": time.time()})
 
 
 def sl_auslösen(preis):
