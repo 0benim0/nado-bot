@@ -46,7 +46,7 @@ TRAIL_PCT    = 0.35    # % Trailing SL hinter laufendem Preis
 MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -411,7 +411,7 @@ def sync_nado():
 # ─── LOOP ─────────────────────────────────────────────────
 
 def loop():
-    global prev_preis, just_acted, wins, total_pnl, grid_mode, grid
+    global prev_preis, just_acted, wins, total_pnl, grid_mode, grid, trail_sl, trail_best, entry_preis
 
     tick = 0
     log(f"Bot | LONG+SHORT Grid | 7 Indikatoren | {'DRY' if DRY_RUN else 'LIVE'}", C)
