@@ -121,10 +121,7 @@ def get_nado_position():
 
 # ─── INDIKATOREN ──────────────────────────────────────────
 
-def calc_ema(closes, n):
-    if len(closes) < n: return None
-    k = 2/(n+1); e = sum(closes[:n])/n
-    for x in closes[n:]: e = x*k + e*(1-k)
+
     return e
 
 
@@ -184,33 +181,7 @@ def calc_adx(candles, n=14):
     return pdi - mdi
 
 
-def calc_parabolic_sar(candles, step=0.02, max_af=0.2):
-    """Parabolic SAR — Punkte unter Preis = LONG, über Preis = SHORT."""
-    if len(candles) < 5: return None
-    # Einfache Implementierung
-    closes = [c["c"] for c in candles]
-    highs  = [c["h"] for c in candles]
-    lows   = [c["l"] for c in candles]
-    bull = closes[1] > closes[0]
-    af = step
-    sar = lows[0] if bull else highs[0]
-    ep  = highs[0] if bull else lows[0]
-    for i in range(1, len(candles)):
-        if bull:
-            if lows[i] < sar:
-                bull = False; sar = ep; ep = lows[i]; af = step
-            else:
-                if highs[i] > ep: ep = highs[i]; af = min(af+step, max_af)
-                sar = sar + af*(ep-sar)
-                sar = min(sar, lows[i-1], lows[max(0,i-2)])
-        else:
-            if highs[i] > sar:
-                bull = True; sar = ep; ep = highs[i]; af = step
-            else:
-                if lows[i] < ep: ep = lows[i]; af = min(af+step, max_af)
-                sar = sar + af*(ep-sar)
-                sar = max(sar, highs[i-1], highs[max(0,i-2)])
-    return 1 if bull else -1  # 1=LONG, -1=SHORT
+
 
 
 def calc_obv(candles):
@@ -240,15 +211,17 @@ def get_signal(candles):
     if not candles or len(candles) < 30: return 0, 0, {}
     closes = [c["c"] for c in candles]
 
-    ema_diff   = (calc_ema(closes, 9) or 0) - (calc_ema(closes, 21) or 0)
+    stoch = calc_stochastic(candles) ← neue Funktion
     atr        = calc_atr(candles)
     obv        = calc_obv(candles)
     vwap       = calc_vwap(candles)
     supertrend = calc_supertrend(candles)
     adx        = calc_adx(candles)
-    psar       = calc_parabolic_sar(candles)
+    cvd        = calc_cvd(candles) ← neue Funktion
+    
 
-    if any(x is None for x in [atr, obv, vwap, supertrend, adx, psar]):
+    if any(x is None for x in [..., stoch, cvd]):
+    
         return 0, 0, {}
 
     # ATR Richtung: Preis über EMA50 = LONG
