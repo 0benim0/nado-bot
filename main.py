@@ -9,7 +9,7 @@ Schließen: 7/7 Indikatoren andere Richtung + Verlust → alles schließen
 SL:        0.3% gegen Einstiegspreis (ab erstem Level)
 Trailing:  0.35% hinter laufendem Preis — zieht immer nach
 
-7 Indikatoren: EMA 9/21, ATR, OBV, VWAP, Supertrend, ADX, Parabolic SAR
+7 Indikatoren: Stochastic, ATR, OBV, VWAP, Supertrend, ADX, CVD
 
 Einrichten: SIGNER_KEY = 1-Click Trading Key (app.nado.xyz → Settings)
 """
@@ -38,15 +38,15 @@ ARCHIVE      = "https://archive.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
 ORDER_SIZE   = 0.0015  # BTC pro Level
-GRID_LEVELS  = 3       # Anzahl Levels
-GRID_STEP    = 0.2     # % Abstand zwischen Levels
-GRID_PROFIT  = 0.2     # % Gewinn pro Level
-SL_PCT       = 0.5     # % gegen Einstieg → SL
-TRAIL_PCT    = 0.5    # % Trailing SL hinter laufendem Preis
+GRID_LEVELS  = 5       # Anzahl Levels
+GRID_STEP    = 0.1     # % Abstand zwischen Levels
+GRID_PROFIT  = 0.30    # % Gewinn pro Level
+SL_PCT       = 0.4     # % gegen Einstieg → SL
+TRAIL_PCT    = 0.2     # % Trailing SL hinter laufendem Preis
 MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -95,16 +95,21 @@ def get_preis():
 
 def get_kerzen(limit=100):
     try:
-        r = requests.post(ARCHIVE,
-            json={"candlesticks": {"product_id": PRODUCT_ID, "granularity": 300, "limit": limit}},
-            headers=HEADERS, timeout=15, verify=False)
-        cs = r.json().get("candlesticks", [])
-        if not cs: return None
-        candles = [{"o": float(c.get("open_x18",0))/1e18, "h": float(c.get("high_x18",0))/1e18,
-                    "l": float(c.get("low_x18",0))/1e18,  "c": float(c.get("close_x18",0))/1e18,
-                    "v": float(c.get("volume",0))/1e18} for c in cs]
-        return list(reversed(candles))
-    except Exception as e: log(f"Kerzen Fehler: {e}", Y)
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "5m", "limit": limit},
+            timeout=15
+        )
+        data = r.json()
+        if not data: return None
+        candles = [{
+            "o": float(c[1]), "h": float(c[2]),
+            "l": float(c[3]), "c": float(c[4]),
+            "v": float(c[5])
+        } for c in data]
+        return candles
+    except Exception as e:
+        log(f"Kerzen Fehler: {e}", Y)
     return None
 
 
@@ -120,10 +125,6 @@ def get_nado_position():
 
 
 # ─── INDIKATOREN ──────────────────────────────────────────
-
-
-    return e
-
 
 def calc_atr(candles, n=14):
     """ATR — misst Volatilität und Trendstärke."""
@@ -148,10 +149,9 @@ def calc_supertrend(candles, n=10, mult=3.0):
     lower = hl2 - mult * atr
     cur = closes[-1]
     prev = closes[-2] if len(closes) > 1 else cur
-    # Preis über lower band = LONG, unter upper band = SHORT
-    if cur > lower and prev <= lower: return 1   # LONG Signal
-    if cur > lower: return 1                      # LONG
-    return -1                                     # SHORT
+    if cur > lower and prev <= lower: return 1
+    if cur > lower: return 1
+    return -1
 
 
 def calc_adx(candles, n=14):
@@ -177,11 +177,7 @@ def calc_adx(candles, n=14):
     pdi = 100 * pdm_s[-1] / atr_s[-1]
     mdi = 100 * mdm_s[-1] / atr_s[-1]
     dx  = 100 * abs(pdi-mdi) / (pdi+mdi) if (pdi+mdi) > 0 else 0
-    # Gibt Richtung zurück: positiv=LONG (pdi>mdi), negativ=SHORT
     return pdi - mdi
-
-
-
 
 
 def calc_obv(candles):
@@ -206,40 +202,88 @@ def calc_vwap(candles):
     return candles[-1]["c"] - tvp/tv
 
 
+# ── NEU: Stochastic — verhindert Einstieg wenn überkauft ──
+def calc_stochastic(candles, n=14):
+    """Stochastic %K — über 70 = überkauft (kein Long), unter 30 = überverkauft (kein Short)."""
+    if len(candles) < n: return None
+    highs  = [c["h"] for c in candles[-n:]]
+    lows   = [c["l"] for c in candles[-n:]]
+    close  = candles[-1]["c"]
+    highest = max(highs)
+    lowest  = min(lows)
+    if highest == lowest: return 50.0  # neutral wenn kein Unterschied
+    k = 100 * (close - lowest) / (highest - lowest)
+    return k  # 0–100: >70 überkauft, <30 überverkauft
+
+
+# ── NEU: CVD — echter Kauf- vs. Verkaufsdruck ─────────────
+def calc_cvd(candles):
+    """CVD (Cumulative Volume Delta) — positiv = Käufer dominieren, negativ = Verkäufer."""
+    if len(candles) < 2: return None
+    cvd = 0.0
+    for c in candles[-20:]:  # letzte 20 Kerzen
+        body = c["h"] - c["l"]
+        if body < 0.0001: continue  # Doji überspringen
+        mid = (c["h"] + c["l"]) / 2
+        if c["c"] > mid:
+            cvd += c["v"] * ((c["c"] - mid) / body)
+        else:
+            cvd -= c["v"] * ((mid - c["c"]) / body)
+    return cvd
+
+
 def get_signal(candles):
     """7 Indikatoren — gibt long_count, short_count zurück."""
     if not candles or len(candles) < 30: return 0, 0, {}
     closes = [c["c"] for c in candles]
 
-    stoch = calc_stochastic(candles) ← neue Funktion
     atr        = calc_atr(candles)
     obv        = calc_obv(candles)
     vwap       = calc_vwap(candles)
     supertrend = calc_supertrend(candles)
     adx        = calc_adx(candles)
-    cvd        = calc_cvd(candles) ← neue Funktion
-    
+    stoch      = calc_stochastic(candles)   # NEU: ersetzt EMA 9/21
+    cvd        = calc_cvd(candles)          # NEU: ersetzt Parabolic SAR
 
-    if any(x is None for x in [..., stoch, cvd]):
-    
+    if any(x is None for x in [atr, obv, vwap, supertrend, adx, stoch, cvd]):
         return 0, 0, {}
 
-    # ATR Richtung: Preis über EMA50 = LONG
-    ema50 = calc_ema(closes, 50)
-    atr_dir = 1 if (ema50 and closes[-1] > ema50) else -1
+    # ATR Volatilitäts-Filter: ATR nicht zu hoch (kein chaotischer Markt)
+    atr_ok = atr < (closes[-1] * 0.002)
 
     longs = [
-        ema_diff > 0,      # EMA 9/21
-        atr_dir > 0,       # ATR + EMA50
-        obv > 0,           # OBV
-        vwap > 0,          # VWAP
-        supertrend == 1,   # Supertrend
-        adx > 0,           # ADX Richtung
-        psar == 1,         # Parabolic SAR
+        vwap > 0,            # 1. VWAP — Preis über fairem Wert
+        supertrend == 1,     # 2. Supertrend — bullish
+        adx > 0,             # 3. ADX Richtung — bullish
+        obv > 0,             # 4. OBV — Volumen bestätigt
+        cvd > 0,             # 5. CVD — Käufer dominieren
+        stoch < 70,          # 6. Stochastic — NICHT überkauft (KEY!)
+        atr_ok,              # 7. ATR — Markt nicht zu volatil
     ]
+
+    shorts = [
+        vwap < 0,            # 1. VWAP — Preis unter fairem Wert
+        supertrend == -1,    # 2. Supertrend — bearish
+        adx < 0,             # 3. ADX Richtung — bearish
+        obv < 0,             # 4. OBV — Volumen bestätigt
+        cvd < 0,             # 5. CVD — Verkäufer dominieren
+        stoch > 30,          # 6. Stochastic — NICHT überverkauft
+        atr_ok,              # 7. ATR — Markt nicht zu volatil
+    ]
+
     long_c  = sum(1 for v in longs if v)
-    short_c = 7 - long_c
-    return long_c, short_c, {"ST": supertrend, "ADX": round(adx, 1) if adx else 0}
+    short_c = sum(1 for v in shorts if v)
+
+    # Sicherheits-Filter: wenn stark überkauft/überverkauft → max 4/7
+    if stoch > 75: long_c  = min(long_c, 4)
+    if stoch < 25: short_c = min(short_c, 4)
+
+    return long_c, short_c, {
+        "ST":    supertrend,
+        "ADX":   round(adx, 1) if adx else 0,
+        "Stoch": round(stoch, 1),
+        "CVD":   round(cvd, 0)
+    }
 
 
 # ─── ORDER ────────────────────────────────────────────────
@@ -317,7 +361,6 @@ def build_grid(preis, modus):
         xp = round(preis*(1+GRID_PROFIT/100)) if modus=="LONG" else round(preis*(1-GRID_PROFIT/100))
         grid[0] = {"entry_price":round(preis),"exit_price":xp,"filled":True,"open_time":time.time()}
         entry_preis = preis
-        # Trailing SL sofort setzen
         if modus == "LONG":
             trail_sl   = preis * (1 - TRAIL_PCT/100)
             trail_best = preis
@@ -338,7 +381,6 @@ def close_all(preis, reason=""):
     if ok is True or DRY_RUN:
         grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None
         log("✅ Alle Positionen geschlossen.", Y); return
-    # Level für Level Fallback
     log("Schließe Level für Level...", Y)
     for lv in grid:
         if lv["filled"] and lv["open_time"] > 0:
@@ -402,7 +444,6 @@ def loop():
 
             if tick % 4 == 0 and grid_mode: sync_nado()
 
-            # Trailing SL aktualisieren
             if grid_mode and real_filled_count() > 0:
                 update_trailing_sl(preis)
 
@@ -489,7 +530,7 @@ def loop():
 
             # ── LONG GRID ─────────────────────────────────
             if grid_mode == "LONG":
-                if falling:
+                if falling and long_c >= 5:
                     for lv in grid:
                         if not lv["filled"] and preis <= lv["entry_price"]*1.001:
                             log(f"🟢 BUY @ {fmt(lv['entry_price'])} TP:{fmt(lv['exit_price'])}", G)
@@ -515,7 +556,7 @@ def loop():
 
             # ── SHORT GRID ────────────────────────────────
             elif grid_mode == "SHORT":
-                if rising:
+                if rising and short_c >= 5:
                     for lv in grid:
                         if not lv["filled"] and preis >= lv["entry_price"]*0.999:
                             log(f"🔴 SHORT @ {fmt(lv['entry_price'])} TP:{fmt(lv['exit_price'])}", R)
@@ -544,7 +585,8 @@ def loop():
                 n = real_filled_count()
                 mt = f"{G}LONG{X}" if grid_mode=="LONG" else f"{R}SHORT{X}" if grid_mode=="SHORT" else "KEIN"
                 tsl = f"TSL:{fmt(trail_sl)}" if trail_sl else ""
-                log(f"BTC {fmt(preis)} | {mt} | Offen:{n}/{GRID_LEVELS} | L:{long_c}/7 S:{short_c}/7 | {wins}W P&L:{total_pnl:+.2f}% {tsl}")
+                stoch_val = det.get("Stoch", "?")
+                log(f"BTC {fmt(preis)} | {mt} | Offen:{n}/{GRID_LEVELS} | L:{long_c}/7 S:{short_c}/7 | {wins}W P&L:{total_pnl:+.2f}% {tsl} Stoch:{stoch_val}")
             time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
@@ -566,6 +608,7 @@ def main():
     print(f"  Start:     {MIN_SIGNAL}/7 Indikatoren")
     print(f"  SL:        {SL_PCT}% gegen Einstieg")
     print(f"  Trailing:  {TRAIL_PCT}% hinter Preis")
+    print(f"  Indikatoren: VWAP, Supertrend, ADX, OBV, CVD, Stochastic, ATR")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
     loop()
