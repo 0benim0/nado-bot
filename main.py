@@ -267,7 +267,7 @@ def get_signal(candles):
         adx < 0,             # 3. ADX Richtung — bearish
         obv < 0,             # 4. OBV — Volumen bestätigt
         cvd < 0,             # 5. CVD — Verkäufer dominieren
-        stoch > 30,          # 6. Stochastic — NICHT überverkauft
+        stoch > 50,          # 6. Stochastic — NICHT überverkauft
         atr_ok,              # 7. ATR — Markt nicht zu volatil
     ]
 
