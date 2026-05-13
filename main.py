@@ -27,9 +27,9 @@ except:
     G=R=Y=C=M=X=B=""
 
 # ═══════════════════════════════════════════════════════════
-WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
-SIGNER_KEY   = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"
-SUBACCOUNT   = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
+WALLET_ADDR  = "0x14A26C3F3fF2C7A5bC4a1E5E5B15972628288ab7"
+SIGNER_KEY   = ""
+SUBACCOUNT   = "0x14a26c3f3ff2c7a5bc4a1e5e5b15972628288ab764656661756c740000000000"
 
 PRODUCT_ID   = 2
 CHAIN_ID     = 57073
@@ -46,7 +46,7 @@ TRAIL_PCT    = 0.2     # % Trailing SL hinter laufendem Preis
 MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -336,8 +336,20 @@ def place_order(is_buy, price, size, sl_order=False):
 
 # ─── GRID ─────────────────────────────────────────────────
 
-def build_grid(preis, modus):
+def build_grid(preis, modus, candles=None):
     global grid, grid_mode, trail_sl, trail_best, entry_preis
+
+    # FIX: Stoch-Filter beim Soforteinstieg — LONG+SHORT
+    if candles:
+        stoch = calc_stochastic(candles)
+        if stoch is not None:
+            if modus == "LONG" and stoch > 70:
+                log(f"⚠️ LONG Soforteinstieg blockiert — Stoch:{stoch:.1f} überkauft (>70)", Y)
+                return
+            if modus == "SHORT" and stoch < 30:
+                log(f"⚠️ SHORT Soforteinstieg blockiert — Stoch:{stoch:.1f} überverkauft (<30)", Y)
+                return
+
     grid_mode = modus; grid = []
     trail_sl = None; trail_best = None; entry_preis = None
 
@@ -406,6 +418,7 @@ def update_trailing_sl(preis):
 
 
 def sync_nado():
+    if DRY_RUN: return  # FIX: kein Sync im DRY RUN — Nado kennt keine DRY Orders
     if (time.time() - last_order_t) < SYNC_WAIT: return
     nado = get_nado_position()
     if nado is None: return
@@ -451,10 +464,10 @@ def loop():
             if grid_mode is None:
                 if long_c >= MIN_SIGNAL and long_c > short_c:
                     log(f"🎯 {long_c}/7 LONG — Grid starten", G)
-                    build_grid(preis, "LONG")
+                    build_grid(preis, "LONG", candles)
                 elif short_c >= MIN_SIGNAL and short_c > long_c:
                     log(f"🎯 {short_c}/7 SHORT — Grid starten", R)
-                    build_grid(preis, "SHORT")
+                    build_grid(preis, "SHORT", candles)
                 else:
                     if tick % 2 == 0:
                         log(f"BTC {fmt(preis)} | L:{long_c}/7 S:{short_c}/7 | Warte 5/7...", Y)
@@ -502,28 +515,33 @@ def loop():
                 if grid_mode=="LONG" and short_c==7:
                     log("🔄 7/7 SHORT → SHORT Grid", M)
                     grid=[]; grid_mode=None
-                    build_grid(preis, "SHORT")
+                    build_grid(preis, "SHORT", candles)
                     time.sleep(INTERVAL); prev_preis=preis; continue
                 elif grid_mode=="SHORT" and long_c==7:
                     log("🔄 7/7 LONG → LONG Grid", M)
                     grid=[]; grid_mode=None
-                    build_grid(preis, "LONG")
+                    build_grid(preis, "LONG", candles)
                     time.sleep(INTERVAL); prev_preis=preis; continue
 
             # ── GRID NEU wenn Preis weg ───────────────────
             if grid and real_filled_count()==0:
+                stoch_val = det.get("Stoch", 50)
                 if grid_mode=="LONG":
                     highest = max(lv["entry_price"] for lv in grid)
-                    if preis > highest*1.001 and long_c >= MIN_SIGNAL:
-                        log(f"Grid neu @ {fmt(preis)}", Y)
-                        build_grid(preis,"LONG")
+                    if preis > highest*1.001 and long_c >= MIN_SIGNAL and stoch_val < 65:
+                        log(f"Grid neu @ {fmt(preis)} (Stoch:{stoch_val})", Y)
+                        build_grid(preis, "LONG", candles)
                         time.sleep(INTERVAL); prev_preis=preis; continue
+                    elif preis > highest*1.001 and stoch_val >= 65:
+                        log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überkauft (>65)", Y)
                 elif grid_mode=="SHORT":
                     lowest = min(lv["entry_price"] for lv in grid)
-                    if preis < lowest*0.999 and short_c >= MIN_SIGNAL:
-                        log(f"Grid neu @ {fmt(preis)}", Y)
-                        build_grid(preis,"SHORT")
+                    if preis < lowest*0.999 and short_c >= MIN_SIGNAL and stoch_val > 35:
+                        log(f"Grid neu @ {fmt(preis)} (Stoch:{stoch_val})", Y)
+                        build_grid(preis, "SHORT", candles)
                         time.sleep(INTERVAL); prev_preis=preis; continue
+                    elif preis < lowest*0.999 and stoch_val <= 35:
+                        log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überverkauft (<35)", Y)
 
             rising  = prev_preis is not None and preis > prev_preis
             falling = prev_preis is not None and preis < prev_preis
