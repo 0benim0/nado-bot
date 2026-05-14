@@ -46,6 +46,7 @@ TRAIL_PCT    = 0.2     # % Trailing SL hinter laufendem Preis
 MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
+COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
 DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
@@ -60,6 +61,7 @@ just_acted     = False
 trail_sl       = None   # Aktueller Trailing SL Preis
 trail_best     = None   # Bester Preis seit Trade-Öffnung
 entry_preis    = None   # Einstiegspreis für SL Berechnung
+last_sl_time   = 0.0    # Zeitpunkt letzter SL/TSL — für Cooldown
 
 
 def ts():    return datetime.now().strftime("%H:%M:%S")
@@ -267,7 +269,7 @@ def get_signal(candles):
         adx < 0,             # 3. ADX Richtung — bearish
         obv < 0,             # 4. OBV — Volumen bestätigt
         cvd < 0,             # 5. CVD — Verkäufer dominieren
-        stoch > 50,          # 6. Stochastic — NICHT überverkauft
+        stoch > 50,          # 6. FIX: Stoch über Mitte = SHORT aktiver
         atr_ok,              # 7. ATR — Markt nicht zu volatil
     ]
 
@@ -383,15 +385,19 @@ def build_grid(preis, modus, candles=None):
 
 
 def close_all(preis, reason=""):
-    global grid, grid_mode, trail_sl, trail_best, entry_preis
+    global grid, grid_mode, trail_sl, trail_best, entry_preis, last_sl_time
     n = real_filled_count()
     if n == 0: grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None; return
     size = round(n * ORDER_SIZE, 4)
     log(f"⛔ {reason} — Schließe {n} Levels ({size} BTC)", R)
     is_buy = (grid_mode == "SHORT")
     ok = place_order(is_buy, preis, size, sl_order=True)
+    verlust = "SL" in reason or "GEGENSIGNAL" in reason
     if ok is True or DRY_RUN:
         grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None
+        if verlust:
+            last_sl_time = time.time()
+            log(f"⏳ Cooldown {COOLDOWN_SL} Min — kein Trade bis {datetime.fromtimestamp(last_sl_time + COOLDOWN_SL*60).strftime('%H:%M:%S')}", Y)
         log("✅ Alle Positionen geschlossen.", Y); return
     log("Schließe Level für Level...", Y)
     for lv in grid:
@@ -400,6 +406,9 @@ def close_all(preis, reason=""):
             lv["filled"]=False; lv["open_time"]=0.0
             time.sleep(2)
     grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None
+    if verlust:
+        last_sl_time = time.time()
+        log(f"⏳ Cooldown {COOLDOWN_SL} Min — kein Trade bis {datetime.fromtimestamp(last_sl_time + COOLDOWN_SL*60).strftime('%H:%M:%S')}", Y)
     log("✅ Alle Positionen geschlossen.", Y)
 
 
@@ -439,7 +448,7 @@ def sync_nado():
 # ─── LOOP ─────────────────────────────────────────────────
 
 def loop():
-    global prev_preis, just_acted, wins, total_pnl, grid_mode, grid, trail_sl, trail_best, entry_preis
+    global prev_preis, just_acted, wins, total_pnl, grid_mode, grid, trail_sl, trail_best, entry_preis, last_sl_time
 
     tick = 0
     log(f"Bot | LONG+SHORT Grid | 7 Indikatoren | {'DRY' if DRY_RUN else 'LIVE'}", C)
@@ -462,6 +471,14 @@ def loop():
 
             # ── KEIN GRID ─────────────────────────────────
             if grid_mode is None:
+                # Cooldown nach SL/TSL prüfen — direkt aus globalem last_sl_time
+                import builtins
+                _lsl = globals().get('last_sl_time', 0.0)
+                cooldown_rest = (_lsl + COOLDOWN_SL*60) - time.time()
+                if cooldown_rest > 0:
+                    if tick % 2 == 0:
+                        log(f"BTC {fmt(preis)} | ⏳ Cooldown noch {int(cooldown_rest/60)}:{int(cooldown_rest%60):02d} Min | L:{long_c}/7 S:{short_c}/7 Stoch:{det.get('Stoch','?')}", Y)
+                    time.sleep(INTERVAL); prev_preis=preis; continue
                 if long_c >= MIN_SIGNAL and long_c > short_c:
                     log(f"🎯 {long_c}/7 LONG — Grid starten", G)
                     build_grid(preis, "LONG", candles)
@@ -528,20 +545,30 @@ def loop():
                 stoch_val = det.get("Stoch", 50)
                 if grid_mode=="LONG":
                     highest = max(lv["entry_price"] for lv in grid)
-                    if preis > highest*1.001 and long_c >= MIN_SIGNAL and stoch_val < 65:
-                        log(f"Grid neu @ {fmt(preis)} (Stoch:{stoch_val})", Y)
-                        build_grid(preis, "LONG", candles)
-                        time.sleep(INTERVAL); prev_preis=preis; continue
-                    elif preis > highest*1.001 and stoch_val >= 65:
-                        log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überkauft (>65)", Y)
+                    if preis > highest*1.001 and long_c >= MIN_SIGNAL:
+                        # Normal: Stoch unter 65
+                        # Ausnahme: starker Trend (6/7 bullish) und Stoch nicht extrem (unter 95)
+                        trend_ausnahme = long_c >= 6 and stoch_val < 95
+                        if stoch_val < 65 or trend_ausnahme:
+                            grund = f"Stoch:{stoch_val}" if stoch_val < 65 else f"Stoch:{stoch_val} Trend {long_c}/7"
+                            log(f"Grid neu @ {fmt(preis)} ({grund})", Y)
+                            build_grid(preis, "LONG", candles)
+                            time.sleep(INTERVAL); prev_preis=preis; continue
+                        else:
+                            log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überkauft (>65)", Y)
                 elif grid_mode=="SHORT":
                     lowest = min(lv["entry_price"] for lv in grid)
-                    if preis < lowest*0.999 and short_c >= MIN_SIGNAL and stoch_val > 35:
-                        log(f"Grid neu @ {fmt(preis)} (Stoch:{stoch_val})", Y)
-                        build_grid(preis, "SHORT", candles)
-                        time.sleep(INTERVAL); prev_preis=preis; continue
-                    elif preis < lowest*0.999 and stoch_val <= 35:
-                        log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überverkauft (<35)", Y)
+                    if preis < lowest*0.999 and short_c >= MIN_SIGNAL:
+                        # Normal: Stoch über 35
+                        # Ausnahme: starker Trend (6/7 bearish) und Stoch nicht extrem (über 5)
+                        trend_ausnahme = short_c >= 6 and stoch_val > 5
+                        if stoch_val > 35 or trend_ausnahme:
+                            grund = f"Stoch:{stoch_val}" if stoch_val > 35 else f"Stoch:{stoch_val} Trend {short_c}/7"
+                            log(f"Grid neu @ {fmt(preis)} ({grund})", Y)
+                            build_grid(preis, "SHORT", candles)
+                            time.sleep(INTERVAL); prev_preis=preis; continue
+                        else:
+                            log(f"⚠️ Grid neu blockiert — Stoch:{stoch_val} überverkauft (<35)", Y)
 
             rising  = prev_preis is not None and preis > prev_preis
             falling = prev_preis is not None and preis < prev_preis
@@ -626,6 +653,7 @@ def main():
     print(f"  Start:     {MIN_SIGNAL}/7 Indikatoren")
     print(f"  SL:        {SL_PCT}% gegen Einstieg")
     print(f"  Trailing:  {TRAIL_PCT}% hinter Preis")
+    print(f"  Cooldown:  {COOLDOWN_SL} Min nach SL/TSL")
     print(f"  Indikatoren: VWAP, Supertrend, ADX, OBV, CVD, Stochastic, ATR")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
