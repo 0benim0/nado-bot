@@ -48,7 +48,7 @@ SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
 COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
 LIMIT_OFFSET = 0.01    # % vom Preis für Limit Orders (~$8 bei BTC $81k) → Maker Fee
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -387,8 +387,8 @@ def build_grid(preis, modus, candles=None):
     log(f"{'🟢 LONG' if is_buy else '🔴 SHORT'} Soforteinstieg @ {fmt(preis)}", G if is_buy else R)
     ok = place_order(is_buy, preis, ORDER_SIZE)
     if ok is True:
-        xp = round(preis*(1+GRID_PROFIT/100)) if modus=="LONG" else round(preis*(1-GRID_PROFIT/100))
-        grid[0] = {"entry_price":round(preis),"exit_price":xp,"filled":True,"open_time":time.time()}
+        # exit_price wird nicht mehr genutzt (kein TP) — trotzdem speichern für Grid-Struktur
+        grid[0] = {"entry_price":round(preis),"exit_price":0,"filled":True,"open_time":time.time()}
         entry_preis = preis
         if modus == "LONG":
             trail_sl   = preis * (1 - TRAIL_PCT/100)
@@ -613,9 +613,14 @@ def loop():
 
             # ── LONG GRID ─────────────────────────────────
             if grid_mode == "LONG":
-                if falling and long_c >= 5:
+                # Kaufen wenn Preis fällt ODER nahe am Level ist und Signale stimmen
+                preis_nahe_long = any(
+                    not lv["filled"] and preis <= lv["entry_price"]*1.002
+                    for lv in grid
+                )
+                if (falling or preis_nahe_long) and long_c >= 5:
                     for lv in grid:
-                        if not lv["filled"] and preis <= lv["entry_price"]*1.001:
+                        if not lv["filled"] and preis <= lv["entry_price"]*1.002:
                             log(f"🟢 BUY @ {fmt(lv['entry_price'])}", G)
                             ok = place_order(True, preis, ORDER_SIZE)
                             if ok is True:
@@ -628,9 +633,14 @@ def loop():
 
             # ── SHORT GRID ────────────────────────────────
             elif grid_mode == "SHORT":
-                if rising and short_c >= 5:
+                # Shorten wenn Preis steigt ODER nahe am Level ist und Signale stimmen
+                preis_nahe_short = any(
+                    not lv["filled"] and preis >= lv["entry_price"]*0.998
+                    for lv in grid
+                )
+                if (rising or preis_nahe_short) and short_c >= 5:
                     for lv in grid:
-                        if not lv["filled"] and preis >= lv["entry_price"]*0.999:
+                        if not lv["filled"] and preis >= lv["entry_price"]*0.998:
                             log(f"🔴 SHORT @ {fmt(lv['entry_price'])}", R)
                             ok = place_order(False, preis, ORDER_SIZE)
                             if ok is True:
