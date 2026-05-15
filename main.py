@@ -40,13 +40,14 @@ HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 ORDER_SIZE   = 0.0015  # BTC pro Level
 GRID_LEVELS  = 5       # Anzahl Levels
 GRID_STEP    = 0.1     # % Abstand zwischen Levels
-GRID_PROFIT  = 0.30    # % Gewinn pro Level
+# GRID_PROFIT deaktiviert — kein fixer TP, nur TSL schliesst
 SL_PCT       = 0.4     # % gegen Einstieg → SL
 TRAIL_PCT    = 0.2     # % Trailing SL hinter laufendem Preis
 MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
 COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
+LIMIT_OFFSET = 0.01    # % vom Preis für Limit Orders (~$8 bei BTC $81k) → Maker Fee
 DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
@@ -298,29 +299,43 @@ def sender_hex():
 def place_order(is_buy, price, size, sl_order=False):
     global last_order_t
     if DRY_RUN:
-        log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
+        order_type = "TAKER" if sl_order else "LIMIT"
+        log(f"[DRY] {order_type} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
         last_order_t = time.time()
         return True
     try:
         from eth_account import Account
-        slip = 0.005 if sl_order else 0.002
-        px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
-        amt  = int(size*1e18) if is_buy else -int(size*1e18)
-        exp  = int(time.time()) + 60
+
+        if sl_order:
+            # SL/TSL → Taker (Market) — muss sofort gefüllt werden
+            slip = 0.005
+            px = round(price * (1 + slip if is_buy else 1 - slip)) * int(1e18)
+            exp = int(time.time()) + 60  # 60 Sek Ablauf
+        else:
+            # Normale Orders → Limit nahe am Markt → Maker Fee (günstiger)
+            offset = round(price * LIMIT_OFFSET / 100)
+            if is_buy:
+                limit_px = price - offset   # leicht unter Markt → wartet auf Fill
+            else:
+                limit_px = price + offset   # leicht über Markt → wartet auf Fill
+            px = round(limit_px) * int(1e18)
+            exp = int(time.time()) + 30     # 30 Sek Ablauf — dann neu versuchen
+
+        amt   = int(size*1e18) if is_buy else -int(size*1e18)
         nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
-        sndr = sender_hex()
-        dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
-                "verifyingContract":f"0x{PRODUCT_ID:040x}"}
-        typ  = {"Order":[
+        sndr  = sender_hex()
+        dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
+                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
+        typ   = {"Order":[
             {"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
             {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
             {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
-        msg  = {"sender":sndr,"priceX18":px,"amount":amt,
-                "expiration":exp,"nonce":nonce,"appendix":1}
-        acc  = Account.from_key(SIGNER_KEY)
-        sig  = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
+        msg   = {"sender":sndr,"priceX18":px,"amount":amt,
+                 "expiration":exp,"nonce":nonce,"appendix":1}
+        acc   = Account.from_key(SIGNER_KEY)
+        sig   = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
         if not sig.startswith("0x"): sig = "0x"+sig
-        pld  = {"place_order":{"product_id":PRODUCT_ID,"order":{
+        pld   = {"place_order":{"product_id":PRODUCT_ID,"order":{
             "sender":sndr,"priceX18":str(px),"amount":str(amt),
             "expiration":str(exp),"nonce":str(nonce),"appendix":"1"
         },"signature":sig}}
@@ -385,7 +400,7 @@ def build_grid(preis, modus, candles=None):
 
 
 def close_all(preis, reason=""):
-    global grid, grid_mode, trail_sl, trail_best, entry_preis, last_sl_time
+    global grid, grid_mode, trail_sl, trail_best, entry_preis, last_sl_time, wins, total_pnl
     n = real_filled_count()
     if n == 0: grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None; return
     size = round(n * ORDER_SIZE, 4)
@@ -394,6 +409,18 @@ def close_all(preis, reason=""):
     ok = place_order(is_buy, preis, size, sl_order=True)
     verlust = "SL" in reason or "GEGENSIGNAL" in reason
     if ok is True or DRY_RUN:
+        # PnL berechnen basierend auf Einstiegspreis
+        if entry_preis and entry_preis > 0:
+            if grid_mode == "LONG":
+                pnl = ((preis - entry_preis) / entry_preis) * 100
+            else:
+                pnl = ((entry_preis - preis) / entry_preis) * 100
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+                log(f"✅ TSL Gewinn: +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+            else:
+                log(f"❌ TSL Verlust: {pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", R)
         grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None
         if verlust:
             last_sl_time = time.time()
@@ -405,6 +432,17 @@ def close_all(preis, reason=""):
             place_order(is_buy, preis, ORDER_SIZE, sl_order=True)
             lv["filled"]=False; lv["open_time"]=0.0
             time.sleep(2)
+    if entry_preis and entry_preis > 0:
+        if grid_mode == "LONG":
+            pnl = ((preis - entry_preis) / entry_preis) * 100
+        else:
+            pnl = ((entry_preis - preis) / entry_preis) * 100
+        total_pnl += pnl
+        if pnl > 0:
+            wins += 1
+            log(f"✅ TSL Gewinn: +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+        else:
+            log(f"❌ TSL Verlust: {pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", R)
     grid=[]; grid_mode=None; trail_sl=None; trail_best=None; entry_preis=None
     if verlust:
         last_sl_time = time.time()
@@ -578,7 +616,7 @@ def loop():
                 if falling and long_c >= 5:
                     for lv in grid:
                         if not lv["filled"] and preis <= lv["entry_price"]*1.001:
-                            log(f"🟢 BUY @ {fmt(lv['entry_price'])} TP:{fmt(lv['exit_price'])}", G)
+                            log(f"🟢 BUY @ {fmt(lv['entry_price'])}", G)
                             ok = place_order(True, preis, ORDER_SIZE)
                             if ok is True:
                                 lv["filled"]=True; lv["open_time"]=time.time(); just_acted=True
@@ -586,25 +624,14 @@ def loop():
                             elif ok=="NO_MARGIN":
                                 lv["filled"]=True; lv["open_time"]=-1
                             break
-                if not just_acted:
-                    for lv in grid:
-                        if not lv["filled"] or lv["open_time"]<=0: continue
-                        if (time.time()-lv["open_time"])<60: continue
-                        if preis >= lv["exit_price"]:
-                            log(f"🔴 SELL @ {fmt(lv['exit_price'])} Einstieg:{fmt(lv['entry_price'])}", R)
-                            ok = place_order(False, preis, ORDER_SIZE)
-                            if ok is True:
-                                lv["filled"]=False; lv["open_time"]=0.0
-                                total_pnl+=GRID_PROFIT; wins+=1; just_acted=True
-                                log(f"✅ +{GRID_PROFIT}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                            break
+                # Kein fixer TP — nur TSL schliesst die Position
 
             # ── SHORT GRID ────────────────────────────────
             elif grid_mode == "SHORT":
                 if rising and short_c >= 5:
                     for lv in grid:
                         if not lv["filled"] and preis >= lv["entry_price"]*0.999:
-                            log(f"🔴 SHORT @ {fmt(lv['entry_price'])} TP:{fmt(lv['exit_price'])}", R)
+                            log(f"🔴 SHORT @ {fmt(lv['entry_price'])}", R)
                             ok = place_order(False, preis, ORDER_SIZE)
                             if ok is True:
                                 lv["filled"]=True; lv["open_time"]=time.time(); just_acted=True
@@ -612,18 +639,7 @@ def loop():
                             elif ok=="NO_MARGIN":
                                 lv["filled"]=True; lv["open_time"]=-1
                             break
-                if not just_acted:
-                    for lv in grid:
-                        if not lv["filled"] or lv["open_time"]<=0: continue
-                        if (time.time()-lv["open_time"])<60: continue
-                        if preis <= lv["exit_price"]:
-                            log(f"🟢 CLOSE @ {fmt(lv['exit_price'])} Einstieg:{fmt(lv['entry_price'])}", G)
-                            ok = place_order(True, preis, ORDER_SIZE)
-                            if ok is True:
-                                lv["filled"]=False; lv["open_time"]=0.0
-                                total_pnl+=GRID_PROFIT; wins+=1; just_acted=True
-                                log(f"✅ +{GRID_PROFIT}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                            break
+                # Kein fixer TP — nur TSL schliesst die Position
 
             prev_preis = preis
             if tick % 2 == 0:
@@ -649,11 +665,13 @@ def main():
     print(f"  ║   7 Indikatoren | Trailing SL            ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet:    {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
-    print(f"  Step:      {GRID_STEP}% | Levels: {GRID_LEVELS} | Profit: +{GRID_PROFIT}%")
+    print(f"  Step:      {GRID_STEP}% | Levels: {GRID_LEVELS}")
+    print(f"  TP:        deaktiviert — nur TSL schliesst")
     print(f"  Start:     {MIN_SIGNAL}/7 Indikatoren")
     print(f"  SL:        {SL_PCT}% gegen Einstieg")
     print(f"  Trailing:  {TRAIL_PCT}% hinter Preis")
     print(f"  Cooldown:  {COOLDOWN_SL} Min nach SL/TSL")
+    print(f"  Orders:    Limit ({LIMIT_OFFSET}% offset) → Maker | SL/TSL → Taker")
     print(f"  Indikatoren: VWAP, Supertrend, ADX, OBV, CVD, Stochastic, ATR")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
