@@ -47,7 +47,7 @@ MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
 COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
-DRY_RUN      = False
+DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
 # State
