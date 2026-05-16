@@ -48,7 +48,7 @@ SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
 COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
 LIMIT_OFFSET = 0.01    # % vom Preis für Limit Orders (~$8 bei BTC $81k) → Maker Fee
-DRY_RUN      = False
+DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -373,11 +373,10 @@ def build_grid(preis, modus, candles=None):
     for i in range(1, GRID_LEVELS+1):
         if modus == "LONG":
             ep = round(preis * (1 - i*GRID_STEP/100))
-            xp = round(ep * (1 + GRID_PROFIT/100))
         else:
             ep = round(preis * (1 + i*GRID_STEP/100))
-            xp = round(ep * (1 - GRID_PROFIT/100))
-        grid.append({"entry_price":ep, "exit_price":xp, "filled":False, "open_time":0.0})
+        # exit_price nicht mehr genutzt (kein TP) — 0 setzen
+        grid.append({"entry_price":ep, "exit_price":0, "filled":False, "open_time":0.0})
 
     lvls = " | ".join(fmt(lv["entry_price"]) for lv in grid)
     log(f"{G if modus=='LONG' else R}{modus} Grid @ {fmt(preis)} | {lvls}{X}", C)
