@@ -47,8 +47,7 @@ MIN_SIGNAL   = 5       # Min 5/7 für Trade öffnen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
 COOLDOWN_SL  = 5       # Minuten Pause nach TSL/SL Verlust
-LIMIT_OFFSET = 0.01    # % vom Preis für Limit Orders (~$8 bei BTC $81k) → Maker Fee
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -299,43 +298,29 @@ def sender_hex():
 def place_order(is_buy, price, size, sl_order=False):
     global last_order_t
     if DRY_RUN:
-        order_type = "TAKER" if sl_order else "LIMIT"
-        log(f"[DRY] {order_type} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
+        log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
         last_order_t = time.time()
         return True
     try:
         from eth_account import Account
-
-        if sl_order:
-            # SL/TSL → Taker (Market) — muss sofort gefüllt werden
-            slip = 0.005
-            px = round(price * (1 + slip if is_buy else 1 - slip)) * int(1e18)
-            exp = int(time.time()) + 60  # 60 Sek Ablauf
-        else:
-            # Normale Orders → Limit nahe am Markt → Maker Fee (günstiger)
-            offset = round(price * LIMIT_OFFSET / 100)
-            if is_buy:
-                limit_px = price - offset   # leicht unter Markt → wartet auf Fill
-            else:
-                limit_px = price + offset   # leicht über Markt → wartet auf Fill
-            px = round(limit_px) * int(1e18)
-            exp = int(time.time()) + 30     # 30 Sek Ablauf — dann neu versuchen
-
-        amt   = int(size*1e18) if is_buy else -int(size*1e18)
+        slip = 0.005 if sl_order else 0.002
+        px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
+        amt  = int(size*1e18) if is_buy else -int(size*1e18)
+        exp  = int(time.time()) + 60
         nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
-        sndr  = sender_hex()
-        dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
-                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
-        typ   = {"Order":[
+        sndr = sender_hex()
+        dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
+                "verifyingContract":f"0x{PRODUCT_ID:040x}"}
+        typ  = {"Order":[
             {"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
             {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
             {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
-        msg   = {"sender":sndr,"priceX18":px,"amount":amt,
-                 "expiration":exp,"nonce":nonce,"appendix":1}
-        acc   = Account.from_key(SIGNER_KEY)
-        sig   = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
+        msg  = {"sender":sndr,"priceX18":px,"amount":amt,
+                "expiration":exp,"nonce":nonce,"appendix":1}
+        acc  = Account.from_key(SIGNER_KEY)
+        sig  = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
         if not sig.startswith("0x"): sig = "0x"+sig
-        pld   = {"place_order":{"product_id":PRODUCT_ID,"order":{
+        pld  = {"place_order":{"product_id":PRODUCT_ID,"order":{
             "sender":sndr,"priceX18":str(px),"amount":str(amt),
             "expiration":str(exp),"nonce":str(nonce),"appendix":"1"
         },"signature":sig}}
@@ -680,7 +665,6 @@ def main():
     print(f"  SL:        {SL_PCT}% gegen Einstieg")
     print(f"  Trailing:  {TRAIL_PCT}% hinter Preis")
     print(f"  Cooldown:  {COOLDOWN_SL} Min nach SL/TSL")
-    print(f"  Orders:    Limit ({LIMIT_OFFSET}% offset) → Maker | SL/TSL → Taker")
     print(f"  Indikatoren: VWAP, Supertrend, ADX, OBV, CVD, Stochastic, ATR")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
