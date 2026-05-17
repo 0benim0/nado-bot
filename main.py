@@ -46,7 +46,7 @@ SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 MIN_ORDER_WAIT = 5     # Sekunden Mindestabstand zwischen Orders
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -147,11 +147,10 @@ def place_order(is_buy, price, size, sl_order=False):
         slip = 0.005 if sl_order else 0.002
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt  = int(size*1e18) if is_buy else -int(size*1e18)
-        # expiration = pure Unix timestamp (current format, NOT legacy)
         exp  = int(time.time()) + 60
-        # nonce: 44 MSB = recv_time in ms, 20 LSB = random
-        nonce = ((int(time.time()*1000) + 10000) << 20) + random.randint(0, 99999)
-        # appendix: Version=1 (bits 0-7), OrderType=DEFAULT=0 (bits 9-10)
+        # Nonce exakt wie Nado Docs: int(time.time()) * 1000, nicht time.time()*1000
+        unix_epoch_ms = int(time.time()) * 1000
+        nonce = ((unix_epoch_ms + 10000) << 20) + random.randint(0, 99999)
         appendix = 1  # Version 1, DEFAULT order type
         sndr = sender_hex()
         dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
