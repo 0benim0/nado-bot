@@ -36,7 +36,7 @@ GRID_PROFIT  = 0.2     # % TP pro Level
 SL_PCT       = 0.5     # % nach letztem Level → SL
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
