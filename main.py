@@ -33,8 +33,7 @@ ORDER_SIZE   = 0.0015  # BTC pro Level
 GRID_LEVELS  = 2       # Levels pro Seite (2 LONG + 2 SHORT = 4 total)
 GRID_STEP    = 0.1     # % Abstand zwischen Levels
 GRID_PROFIT  = 0.2     # % TP pro Level
-SL_PCT       = 0.5     # % nach letztem Level → SL
-SYNC_WAIT    = 180     # Sek nach Order kein Sync
+SL_PCT       = 0.5     # % nach letztem Level -> SL
 INTERVAL     = 30      # Sek pro Tick
 DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
@@ -90,29 +89,27 @@ def get_kerzen(limit=100):
     return None
 
 
-def get_nado_position():
+# ─── NONCE & ORDER ────────────────────────────────────────
+
+def get_nonce():
+    """
+    Holt Nonce direkt von Nado API.
+    Laut Nado Docs: order_nonce = (timestamp_ms + 100000) << 20
+    Jede Abfrage gibt eine neue eindeutige Nonce -> keine Doppel-Orders.
+    """
     try:
-        r = requests.get(f"{GATEWAY}/query?type=subaccount_info&subaccount={SUBACCOUNT}",
-                         headers={"Accept-Encoding":"gzip"}, timeout=15, verify=False)
-        for pb in r.json().get("data", {}).get("perp_balances", []):
-            if pb.get("product_id") == PRODUCT_ID:
-                return float(pb["balance"]["amount"]) / 1e18
-    except Exception as e: log(f"Nado API Fehler: {e}", Y)
-    return None
+        r = requests.get(
+            f"{GATEWAY}/query?type=nonces&address={WALLET_ADDR}",
+            headers={"Accept-Encoding":"gzip"}, timeout=10, verify=False)
+        data = r.json().get("data", {})
+        nonce = data.get("order_nonce")
+        if nonce:
+            return int(nonce)
+    except Exception as e:
+        log(f"Nonce API Fehler: {e}", Y)
+    # Fallback: Nado Formel
+    return ((int(time.time()) * 1000 + 100000) << 20) + random.randint(0, 99999)
 
-
-def calc_atr(candles, n=14):
-    if len(candles) < n+1: return None
-    trs = []
-    for i in range(1, len(candles)):
-        h=candles[i]["h"]; l=candles[i]["l"]; pc=candles[i-1]["c"]
-        trs.append(max(h-l, abs(h-pc), abs(l-pc)))
-    atr = sum(trs[:n])/n
-    for tr in trs[n:]: atr = (atr*(n-1)+tr)/n
-    return atr
-
-
-# ─── ORDER ────────────────────────────────────────────────
 
 def sender_hex():
     ab = bytes.fromhex(WALLET_ADDR.lower().replace("0x",""))
@@ -122,7 +119,7 @@ def sender_hex():
 def place_order(is_buy, price, size, sl_order=False):
     global last_order_t, order_lock
     if order_lock:
-        log("⚠️ Order Lock aktiv — übersprungen", Y)
+        log("⚠️ Order Lock aktiv -- uebersprungen", Y)
         return False
     order_lock = True
     try:
@@ -135,7 +132,7 @@ def place_order(is_buy, price, size, sl_order=False):
         px    = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt   = int(size*1e18) if is_buy else -int(size*1e18)
         exp   = int(time.time()) + 60
-        nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
+        nonce = get_nonce()  # Direkt von Nado API -- eindeutig
         sndr  = sender_hex()
         dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                  "verifyingContract":f"0x{PRODUCT_ID:040x}"}
@@ -155,11 +152,11 @@ def place_order(is_buy, price, size, sl_order=False):
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            log("✅ Order OK!", G); last_order_t = time.time(); return True
+            log("OK!", G); last_order_t = time.time(); return True
         code = d.get("error_code", 0)
         if code == 2006:
-            log("⚠️ Kein Kapital (2006)", Y); return "NO_MARGIN"
-        log(f"❌ {d.get('error','')} (Code:{code})", R); return False
+            log("Kein Kapital (2006)", Y); return "NO_MARGIN"
+        log(f"Fehler: {d.get('error','')} (Code:{code})", R); return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
     finally:
@@ -189,10 +186,10 @@ def build_neutral_grid(preis):
     short_lvls = " | ".join(fmt(lv["entry"]) for lv in short_grid)
     sl_u = fmt(center_price * (1 - (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     sl_o = fmt(center_price * (1 + (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
-    log(f"═══ NEUTRAL GRID @ {fmt(preis)} ═══", C)
-    log(f"📗 LONG  Levels: {long_lvls}", G)
-    log(f"📕 SHORT Levels: {short_lvls}", R)
-    log(f"SL: {sl_u} ↔ {sl_o}", Y)
+    log(f"NEUTRAL GRID @ {fmt(preis)}", C)
+    log(f"LONG  Levels: {long_lvls}", G)
+    log(f"SHORT Levels: {short_lvls}", R)
+    log(f"SL: {sl_u} <-> {sl_o}", Y)
 
 
 def reset_grid():
@@ -204,7 +201,7 @@ def close_all(preis, reason=""):
     global total_pnl, wins, losses
     n_long=long_offen(); n_short=short_offen()
     if n_long==0 and n_short==0: reset_grid(); return
-    log(f"⛔ {reason} — Schließe {n_long}L + {n_short}S", R)
+    log(f"Schliesse {n_long}L + {n_short}S: {reason}", R)
     if n_long > 0:
         ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), sl_order=True)
         if ok is True:
@@ -240,91 +237,85 @@ def loop():
             preis = get_preis()
             if not preis: log("Kein Preis...", Y); time.sleep(INTERVAL); continue
 
-            candles = get_kerzen(100)
-            if not candles: log("Keine Kerzen...", Y); time.sleep(INTERVAL); continue
-
-            # ── GRID AUFBAUEN ──────────────────────────────
             if not grid_aktiv:
                 build_neutral_grid(preis)
                 time.sleep(INTERVAL); continue
 
-            # ── SL PRÜFEN ──────────────────────────────────
             sl_u = center_price * (1 - (GRID_LEVELS*GRID_STEP + SL_PCT)/100)
             sl_o = center_price * (1 + (GRID_LEVELS*GRID_STEP + SL_PCT)/100)
 
             if preis <= sl_u:
-                log(f"⛔ SL unten @ {fmt(preis)}", R)
                 close_all(preis, "SL UNTEN"); time.sleep(INTERVAL); continue
-
             if preis >= sl_o:
-                log(f"⛔ SL oben @ {fmt(preis)}", R)
                 close_all(preis, "SL OBEN"); time.sleep(INTERVAL); continue
 
             just_acted = False
+            order_bereit = (time.time() - last_order_t) >= 10
 
-            # ── LONG LEVELS ────────────────────────────────
-            for lv in long_grid:
-                if not lv["filled"] and preis <= lv["entry"]*1.001:
-                    if (time.time() - last_order_t) < 3:
-                        break  # Warte 10 Sek nach letzter Order
-                    log(f"🟢 LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", G)
-                    ok = place_order(True, preis, ORDER_SIZE)
-                    if ok is True:
-                        lv["filled"]=True; lv["open_time"]=time.time()
-                    elif ok=="NO_MARGIN":
-                        lv["filled"]=True; lv["open_time"]=-1
-                    just_acted=True; break
+            # LONG LEVELS
+            if order_bereit:
+                for lv in long_grid:
+                    if not lv["filled"] and preis <= lv["entry"]*1.001:
+                        log(f"LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", G)
+                        lv["filled"] = True; lv["open_time"] = time.time()
+                        ok = place_order(True, preis, ORDER_SIZE)
+                        if not ok and ok != "NO_MARGIN":
+                            lv["filled"] = False; lv["open_time"] = 0.0
+                        elif ok == "NO_MARGIN":
+                            lv["open_time"] = -1
+                        just_acted = True; break
 
-            # ── LONG TP ────────────────────────────────────
+            # LONG TP
             if not just_acted:
                 for lv in long_grid:
-                    if not lv["filled"] or lv["open_time"]<=0: continue
-                    if (time.time()-lv["open_time"])<30: continue
+                    if not lv["filled"] or lv["open_time"] <= 0: continue
+                    if (time.time()-lv["open_time"]) < 30: continue
                     if preis >= lv["tp"]:
                         ok = place_order(False, preis, ORDER_SIZE)
                         if ok is True:
+                            lv["filled"] = False; lv["open_time"] = 0.0
                             pnl=(preis-lv["entry"])/lv["entry"]*100
                             total_pnl+=pnl; wins+=1
-                            log(f"✅ LONG TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                            lv["filled"]=False; lv["open_time"]=0.0
-                        just_acted=True; break
+                            log(f"LONG TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+                        just_acted = True; break
 
-            # ── SHORT LEVELS ───────────────────────────────
-            if not just_acted:
+            # SHORT LEVELS
+            if not just_acted and order_bereit:
                 for lv in short_grid:
                     if not lv["filled"] and preis >= lv["entry"]*0.999:
-                        log(f"🔴 SHORT @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", R)
+                        log(f"SHORT @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", R)
+                        lv["filled"] = True; lv["open_time"] = time.time()
                         ok = place_order(False, preis, ORDER_SIZE)
-                        if ok is True:
-                            lv["filled"]=True; lv["open_time"]=time.time()
-                        elif ok=="NO_MARGIN":
-                            lv["filled"]=True; lv["open_time"]=-1
-                        just_acted=True; break
+                        if not ok and ok != "NO_MARGIN":
+                            lv["filled"] = False; lv["open_time"] = 0.0
+                        elif ok == "NO_MARGIN":
+                            lv["open_time"] = -1
+                        just_acted = True; break
 
-            # ── SHORT TP ───────────────────────────────────
+            # SHORT TP
             if not just_acted:
                 for lv in short_grid:
-                    if not lv["filled"] or lv["open_time"]<=0: continue
-                    if (time.time()-lv["open_time"])<30: continue
+                    if not lv["filled"] or lv["open_time"] <= 0: continue
+                    if (time.time()-lv["open_time"]) < 30: continue
                     if preis <= lv["tp"]:
                         ok = place_order(True, preis, ORDER_SIZE)
                         if ok is True:
+                            lv["filled"] = False; lv["open_time"] = 0.0
                             pnl=(lv["entry"]-preis)/lv["entry"]*100
                             total_pnl+=pnl; wins+=1
-                            log(f"✅ SHORT TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                            lv["filled"]=False; lv["open_time"]=0.0
-                        just_acted=True; break
+                            log(f"SHORT TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+                        just_acted = True; break
 
             if tick % 2 == 0:
-                log(f"BTC {fmt(preis)} | 🟢{long_offen()}/{GRID_LEVELS} 🔴{short_offen()}/{GRID_LEVELS} | "
-                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}% | SL:{fmt(sl_u)}↔{fmt(sl_o)}")
+                log(f"BTC {fmt(preis)} | L:{long_offen()}/{GRID_LEVELS} S:{short_offen()}/{GRID_LEVELS} | "
+                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}%")
 
             time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
             log("Bot gestoppt.", Y)
             if long_offen()>0 or short_offen()>0:
-                log(f"⚠️ {long_offen()}L + {short_offen()}S offen — manuell schließen!", R)
+                log(f"Offene Positionen: {long_offen()}L + {short_offen()}S -- manuell schliessen!", R)
             break
         except Exception as e:
             log(f"Fehler: {e}", R); time.sleep(5)
@@ -332,7 +323,7 @@ def loop():
 
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
-    print(f"  ║   Nado.xyz — Neutral Grid Bot            ║")
+    print(f"  ║   Nado.xyz -- Neutral Grid Bot           ║")
     print(f"  ║   LONG unten + SHORT oben gleichzeitig   ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet:  {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
