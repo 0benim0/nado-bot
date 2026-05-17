@@ -265,6 +265,8 @@ def loop():
             # ── LONG LEVELS ────────────────────────────────
             for lv in long_grid:
                 if not lv["filled"] and preis <= lv["entry"]*1.001:
+                    if (time.time() - last_order_t) < 3:
+                        break  # Warte 10 Sek nach letzter Order
                     log(f"🟢 LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", G)
                     ok = place_order(True, preis, ORDER_SIZE)
                     if ok is True:
