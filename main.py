@@ -45,7 +45,7 @@ GRID_PROFIT  = 0.1     # % TP pro Level (= 1 Step weiter)
 SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -323,15 +323,17 @@ def loop():
 
             # ── LONG LEVELS prüfen ─────────────────────────
             for lv in long_grid:
-                if not lv["filled"] and preis <= lv["entry"] * 1.002:
+                if not lv["filled"] and preis <= lv["entry"] * 1.001:
                     log(f"🟢 LONG  @ {fmt(lv['entry'])} → TP: {fmt(lv['tp'])}", G)
+                    lv["filled"] = True  # sofort blockieren — verhindert Doppelorder
+                    lv["open_time"] = time.time()
                     ok = place_order(True, preis, ORDER_SIZE)
-                    if ok is True:
-                        lv["filled"] = True
-                        lv["open_time"] = time.time()
-                        just_acted = True
-                    elif ok == "NO_MARGIN":
-                        lv["filled"] = True; lv["open_time"] = -1
+                    if ok == "NO_MARGIN":
+                        lv["open_time"] = -1
+                    elif not ok:
+                        lv["filled"] = False  # zurücksetzen bei Fehler
+                        lv["open_time"] = 0.0
+                    just_acted = True
                     break
 
             # ── LONG TP prüfen ─────────────────────────────
@@ -341,27 +343,30 @@ def loop():
                     if (time.time() - lv["open_time"]) < 30: continue
                     if preis >= lv["tp"]:
                         log(f"✅ LONG TP @ {fmt(preis)} | Einstieg: {fmt(lv['entry'])} | +{GRID_PROFIT}%", G)
+                        lv["filled"] = False  # sofort freigeben
+                        lv["open_time"] = 0.0
                         ok = place_order(False, preis, ORDER_SIZE)
                         if ok is True:
                             pnl = ((preis - lv["entry"]) / lv["entry"]) * 100
                             total_pnl += pnl; wins += 1
-                            lv["filled"] = False; lv["open_time"] = 0.0
                             log(f"   Total: {total_pnl:+.2f}% | {wins}W {losses}L", G)
-                            just_acted = True
+                        just_acted = True
                         break
 
             # ── SHORT LEVELS prüfen ────────────────────────
             if not just_acted:
                 for lv in short_grid:
-                    if not lv["filled"] and preis >= lv["entry"] * 0.998:
+                    if not lv["filled"] and preis >= lv["entry"] * 0.999:
                         log(f"🔴 SHORT @ {fmt(lv['entry'])} → TP: {fmt(lv['tp'])}", R)
+                        lv["filled"] = True  # sofort blockieren
+                        lv["open_time"] = time.time()
                         ok = place_order(False, preis, ORDER_SIZE)
-                        if ok is True:
-                            lv["filled"] = True
-                            lv["open_time"] = time.time()
-                            just_acted = True
-                        elif ok == "NO_MARGIN":
-                            lv["filled"] = True; lv["open_time"] = -1
+                        if ok == "NO_MARGIN":
+                            lv["open_time"] = -1
+                        elif not ok:
+                            lv["filled"] = False
+                            lv["open_time"] = 0.0
+                        just_acted = True
                         break
 
             # ── SHORT TP prüfen ────────────────────────────
@@ -371,13 +376,14 @@ def loop():
                     if (time.time() - lv["open_time"]) < 30: continue
                     if preis <= lv["tp"]:
                         log(f"✅ SHORT TP @ {fmt(preis)} | Einstieg: {fmt(lv['entry'])} | +{GRID_PROFIT}%", G)
+                        lv["filled"] = False  # sofort freigeben
+                        lv["open_time"] = 0.0
                         ok = place_order(True, preis, ORDER_SIZE)
                         if ok is True:
                             pnl = ((lv["entry"] - preis) / lv["entry"]) * 100
                             total_pnl += pnl; wins += 1
-                            lv["filled"] = False; lv["open_time"] = 0.0
                             log(f"   Total: {total_pnl:+.2f}% | {wins}W {losses}L", G)
-                            just_acted = True
+                        just_acted = True
                         break
 
             # ── SYNC ───────────────────────────────────────
