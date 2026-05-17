@@ -46,7 +46,7 @@ SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 MIN_ORDER_WAIT = 5     # Sekunden Mindestabstand zwischen Orders
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = False
+DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
 # State
