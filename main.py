@@ -43,9 +43,10 @@ GRID_LEVELS  = 5       # Levels pro Seite (5 LONG + 5 SHORT = 10 total)
 GRID_STEP    = 0.1     # % Abstand zwischen Levels
 GRID_PROFIT  = 0.1     # % TP pro Level (= 1 Step weiter)
 SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
+MIN_ORDER_WAIT = 5     # Sekunden Mindestabstand zwischen Orders
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -57,6 +58,7 @@ total_pnl    = 0.0
 last_order_t = 0.0
 center_price = None  # Preis beim Grid-Start
 grid_aktiv   = False
+order_lock   = False  # Verhindert doppelte Orders
 
 
 def ts():     return datetime.now().strftime("%H:%M:%S")
@@ -130,12 +132,17 @@ def sender_hex():
 
 
 def place_order(is_buy, price, size, sl_order=False):
-    global last_order_t
-    if DRY_RUN:
-        log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
-        last_order_t = time.time()
-        return True
+    global last_order_t, order_lock
+    # Globaler Lock — verhindert doppelte Orders
+    if order_lock:
+        log("⚠️ Order Lock aktiv — übersprungen", Y)
+        return False
+    order_lock = True
     try:
+        if DRY_RUN:
+            log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
+            last_order_t = time.time()
+            return True
         from eth_account import Account
         slip = 0.005 if sl_order else 0.002
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
@@ -168,6 +175,8 @@ def place_order(is_buy, price, size, sl_order=False):
         log(f"❌ {d.get('error','')} (Code:{code})", R); return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
+    finally:
+        order_lock = False  # Lock immer freigeben
 
 
 # ─── NEUTRAL GRID AUFBAUEN ────────────────────────────────
@@ -320,6 +329,14 @@ def loop():
                 time.sleep(INTERVAL); continue
 
             just_acted = False
+
+            # Mindestabstand zwischen Orders prüfen
+            if (time.time() - last_order_t) < MIN_ORDER_WAIT:
+                if tick % 2 == 0:
+                    n_long = long_offen(); n_short = short_offen()
+                    log(f"BTC {fmt(preis)} | 🟢{n_long}/{GRID_LEVELS} 🔴{n_short}/{GRID_LEVELS} | "
+                        f"{wins}W {losses}L P&L:{total_pnl:+.2f}%")
+                time.sleep(INTERVAL); continue
 
             # ── LONG LEVELS prüfen ─────────────────────────
             for lv in long_grid:
