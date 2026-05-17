@@ -28,9 +28,9 @@ except:
     G=R=Y=C=M=X=B=""
 
 # ═══════════════════════════════════════════════════════════
-WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
-SIGNER_KEY   = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"
-SUBACCOUNT   = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
+WALLET_ADDR  = "0x14A26C3F3fF2C7A5bC4a1E5E5B15972628288ab7"
+SIGNER_KEY   = ""
+SUBACCOUNT   = "0x14a26c3f3ff2c7a5bc4a1e5e5b15972628288ab764656661756c740000000000"
 
 PRODUCT_ID   = 2
 CHAIN_ID     = 57073
@@ -46,7 +46,7 @@ SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 MIN_ORDER_WAIT = 5     # Sekunden Mindestabstand zwischen Orders
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -147,8 +147,8 @@ def place_order(is_buy, price, size, sl_order=False):
         slip = 0.005 if sl_order else 0.002
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt  = int(size*1e18) if is_buy else -int(size*1e18)
-        exp  = int(time.time()) + 120  # 120 Sek — mehr Zeit für Nado
-        nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
+        exp   = int(time.time()) + 120
+        nonce = int(time.time() * 1000) + random.randint(1, 999)
         sndr = sender_hex()
         dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
@@ -157,13 +157,13 @@ def place_order(is_buy, price, size, sl_order=False):
             {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
             {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
         msg  = {"sender":sndr,"priceX18":px,"amount":amt,
-                "expiration":exp,"nonce":nonce,"appendix":1}
+                "expiration":exp,"nonce":nonce,"appendix":0}
         acc  = Account.from_key(SIGNER_KEY)
         sig  = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
         if not sig.startswith("0x"): sig = "0x"+sig
         pld  = {"place_order":{"product_id":PRODUCT_ID,"order":{
             "sender":sndr,"priceX18":str(px),"amount":str(amt),
-            "expiration":str(exp),"nonce":str(nonce),"appendix":"1"
+            "expiration":str(exp),"nonce":str(nonce),"appendix":"0"
         },"signature":sig}}
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
