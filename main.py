@@ -230,6 +230,7 @@ def close_all(preis, reason=""):
 # ─── LOOP ─────────────────────────────────────────────────
 
 def loop():
+    global wins, losses, total_pnl
     tick = 0
     log(f"Neutral Grid Bot | {'DRY' if DRY_RUN else 'LIVE'}", C)
 
