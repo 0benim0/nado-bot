@@ -45,7 +45,7 @@ GRID_PROFIT  = 0.1     # % TP pro Level (= 1 Step weiter)
 SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = False
+DRY_RUN      = True
 # ═══════════════════════════════════════════════════════════
 
 # State
