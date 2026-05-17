@@ -126,7 +126,21 @@ def calc_atr(candles, n=14):
 
 # ─── ORDER ────────────────────────────────────────────────
 
-def sender_hex():
+def get_nonce():
+    """Holt empfohlene Nonce direkt von Nado API."""
+    try:
+        r = requests.get(
+            f"{GATEWAY}/query?type=nonces&address={WALLET_ADDR}",
+            headers={"Accept-Encoding":"gzip"}, timeout=10, verify=False)
+        data = r.json().get("data", {})
+        nonce = data.get("order_nonce")
+        if nonce:
+            return int(nonce)
+    except Exception as e:
+        log(f"Nonce Fehler: {e}", Y)
+    # Fallback: Nado Formel (timestamp_ms + 100000) << 20
+    unix_epoch_ms = int(time.time()) * 1000
+    return ((unix_epoch_ms + 100000) << 20) + random.randint(0, 99999)
     ab = bytes.fromhex(WALLET_ADDR.lower().replace("0x",""))
     return "0x" + (ab + b"default".ljust(12, b"\x00")).hex()
 
@@ -147,11 +161,9 @@ def place_order(is_buy, price, size, sl_order=False):
         slip = 0.005 if sl_order else 0.002
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt  = int(size*1e18) if is_buy else -int(size*1e18)
-        exp  = int(time.time()) + 60
-        # Nonce exakt wie Nado Docs: int(time.time()) * 1000, nicht time.time()*1000
-        unix_epoch_ms = int(time.time()) * 1000
-        nonce = ((unix_epoch_ms + 10000) << 20) + random.randint(0, 99999)
-        appendix = 1  # Version 1, DEFAULT order type
+        exp   = int(time.time()) + 60
+        nonce = get_nonce()  # Direkt von Nado API
+        appendix = 1  # Version 1, DEFAULT
         sndr = sender_hex()
         dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
