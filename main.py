@@ -59,7 +59,6 @@ last_order_t = 0.0
 center_price = None  # Preis beim Grid-Start
 grid_aktiv   = False
 order_lock   = False  # Verhindert doppelte Orders
-nonce_counter = int(time.time() * 1000)  # Globaler Nonce-Zähler — immer eindeutig
 
 
 def ts():     return datetime.now().strftime("%H:%M:%S")
@@ -133,7 +132,7 @@ def sender_hex():
 
 
 def place_order(is_buy, price, size, sl_order=False):
-    global last_order_t, order_lock, nonce_counter
+    global last_order_t, order_lock
     # Globaler Lock — verhindert doppelte Orders
     if order_lock:
         log("⚠️ Order Lock aktiv — übersprungen", Y)
@@ -148,10 +147,8 @@ def place_order(is_buy, price, size, sl_order=False):
         slip = 0.005 if sl_order else 0.002
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt  = int(size*1e18) if is_buy else -int(size*1e18)
-        exp  = int(time.time()) + 60
-        # Eindeutiger Nonce — immer größer als vorheriger
-        nonce_counter += random.randint(1000, 9999)
-        nonce = nonce_counter
+        exp  = int(time.time()) + 120  # 120 Sek — mehr Zeit für Nado
+        nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
         sndr = sender_hex()
         dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
@@ -345,15 +342,15 @@ def loop():
             for lv in long_grid:
                 if not lv["filled"] and preis <= lv["entry"] * 1.001:
                     log(f"🟢 LONG  @ {fmt(lv['entry'])} → TP: {fmt(lv['tp'])}", G)
-                    lv["filled"] = True  # sofort blockieren — verhindert Doppelorder
+                    lv["filled"] = True
                     lv["open_time"] = time.time()
                     ok = place_order(True, preis, ORDER_SIZE)
                     if ok == "NO_MARGIN":
                         lv["open_time"] = -1
                     elif not ok:
-                        lv["filled"] = False  # zurücksetzen bei Fehler
+                        lv["filled"] = False
                         lv["open_time"] = 0.0
-                    just_acted = True
+                    just_acted = True  # auch bei Fehler — kein zweiter Versuch im gleichen Tick
                     break
 
             # ── LONG TP prüfen ─────────────────────────────
@@ -363,7 +360,7 @@ def loop():
                     if (time.time() - lv["open_time"]) < 30: continue
                     if preis >= lv["tp"]:
                         log(f"✅ LONG TP @ {fmt(preis)} | Einstieg: {fmt(lv['entry'])} | +{GRID_PROFIT}%", G)
-                        lv["filled"] = False  # sofort freigeben
+                        lv["filled"] = False
                         lv["open_time"] = 0.0
                         ok = place_order(False, preis, ORDER_SIZE)
                         if ok is True:
@@ -378,7 +375,7 @@ def loop():
                 for lv in short_grid:
                     if not lv["filled"] and preis >= lv["entry"] * 0.999:
                         log(f"🔴 SHORT @ {fmt(lv['entry'])} → TP: {fmt(lv['tp'])}", R)
-                        lv["filled"] = True  # sofort blockieren
+                        lv["filled"] = True
                         lv["open_time"] = time.time()
                         ok = place_order(False, preis, ORDER_SIZE)
                         if ok == "NO_MARGIN":
@@ -386,7 +383,7 @@ def loop():
                         elif not ok:
                             lv["filled"] = False
                             lv["open_time"] = 0.0
-                        just_acted = True
+                        just_acted = True  # auch bei Fehler
                         break
 
             # ── SHORT TP prüfen ────────────────────────────
@@ -396,7 +393,7 @@ def loop():
                     if (time.time() - lv["open_time"]) < 30: continue
                     if preis <= lv["tp"]:
                         log(f"✅ SHORT TP @ {fmt(preis)} | Einstieg: {fmt(lv['entry'])} | +{GRID_PROFIT}%", G)
-                        lv["filled"] = False  # sofort freigeben
+                        lv["filled"] = False
                         lv["open_time"] = 0.0
                         ok = place_order(True, preis, ORDER_SIZE)
                         if ok is True:
