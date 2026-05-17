@@ -38,14 +38,14 @@ GATEWAY      = "https://gateway.prod.nado.xyz/v1"
 ARCHIVE      = "https://archive.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
-ORDER_SIZE   = 0.0015  # BTC pro Level (LONG und SHORT)
-GRID_LEVELS  = 5       # Levels pro Seite (5 LONG + 5 SHORT = 10 total)
-GRID_STEP    = 0.1     # % Abstand zwischen Levels
-GRID_PROFIT  = 0.1     # % TP pro Level (= 1 Step weiter)
+ORDER_SIZE   = 0.002  # BTC pro Level (LONG und SHORT)
+GRID_LEVELS  = 6       # Levels pro Seite (5 LONG + 5 SHORT = 10 total)
+GRID_STEP    = 0.15     # % Abstand zwischen Levels
+GRID_PROFIT  = 0.15     # % TP pro Level (= 1 Step weiter)
 SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
