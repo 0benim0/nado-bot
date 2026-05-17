@@ -4,7 +4,7 @@ Nado.xyz — Neutral Grid Bot
 LONG Levels unter Markt + SHORT Levels über Markt gleichzeitig
 Profit bei jeder Preisbewegung — kein Richtungsraten
 
-Einrichten: SIGNER_KEY = 1-Click Trading Key (app.nado.xyz → Settings)
+Einrichten: SIGNER_KEY = 1-Click Trading Key (app.nado.xyz -> Settings)
 """
 
 import time, random, requests, sys, urllib3
@@ -29,12 +29,12 @@ CHAIN_ID     = 57073
 GATEWAY      = "https://gateway.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
-ORDER_SIZE   = 0.0015  # BTC pro Level
-GRID_LEVELS  = 2       # Levels pro Seite (2 LONG + 2 SHORT = 4 total)
-GRID_STEP    = 0.1     # % Abstand zwischen Levels
-GRID_PROFIT  = 0.2     # % TP pro Level
-SL_PCT       = 0.5     # % nach letztem Level -> SL
-INTERVAL     = 30      # Sek pro Tick
+ORDER_SIZE   = 0.0015
+GRID_LEVELS  = 2
+GRID_STEP    = 0.1
+GRID_PROFIT  = 0.2
+SL_PCT       = 0.5
+INTERVAL     = 30
 DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
@@ -59,8 +59,6 @@ def long_offen():  return sum(1 for lv in long_grid  if lv["filled"])
 def short_offen(): return sum(1 for lv in short_grid if lv["filled"])
 
 
-# ─── API ──────────────────────────────────────────────────
-
 def get_preis():
     try:
         r = requests.get(f"{GATEWAY}/query?type=all_products",
@@ -74,40 +72,15 @@ def get_preis():
     return None
 
 
-def get_kerzen(limit=100):
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "5m", "limit": limit},
-            timeout=15
-        )
-        data = r.json()
-        if not data: return None
-        return [{"h":float(c[2]),"l":float(c[3]),"c":float(c[4]),"v":float(c[5])} for c in data]
-    except Exception as e:
-        log(f"Kerzen Fehler: {e}", Y)
-    return None
-
-
-# ─── NONCE & ORDER ────────────────────────────────────────
-
 def get_nonce():
-    """
-    Holt Nonce direkt von Nado API.
-    Laut Nado Docs: order_nonce = (timestamp_ms + 100000) << 20
-    Jede Abfrage gibt eine neue eindeutige Nonce -> keine Doppel-Orders.
-    """
     try:
         r = requests.get(
             f"{GATEWAY}/query?type=nonces&address={WALLET_ADDR}",
             headers={"Accept-Encoding":"gzip"}, timeout=10, verify=False)
         data = r.json().get("data", {})
         nonce = data.get("order_nonce")
-        if nonce:
-            return int(nonce)
-    except Exception as e:
-        log(f"Nonce API Fehler: {e}", Y)
-    # Fallback: Nado Formel
+        if nonce: return int(nonce)
+    except Exception as e: log(f"Nonce Fehler: {e}", Y)
     return ((int(time.time()) * 1000 + 100000) << 20) + random.randint(0, 99999)
 
 
@@ -118,21 +91,18 @@ def sender_hex():
 
 def place_order(is_buy, price, size, sl_order=False):
     global last_order_t, order_lock
-    if order_lock:
-        log("⚠️ Order Lock aktiv -- uebersprungen", Y)
-        return False
+    if order_lock: log("Order Lock aktiv", Y); return False
     order_lock = True
     try:
         if DRY_RUN:
             log(f"[DRY] {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
-            last_order_t = time.time()
-            return True
+            last_order_t = time.time(); return True
         from eth_account import Account
         slip  = 0.005 if sl_order else 0.002
         px    = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt   = int(size*1e18) if is_buy else -int(size*1e18)
         exp   = int(time.time()) + 60
-        nonce = get_nonce()  # Direkt von Nado API -- eindeutig
+        nonce = get_nonce()
         sndr  = sender_hex()
         dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                  "verifyingContract":f"0x{PRODUCT_ID:040x}"}
@@ -152,43 +122,31 @@ def place_order(is_buy, price, size, sl_order=False):
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            log("OK!", G); last_order_t = time.time(); return True
+            log("✅ Order OK!", G); last_order_t = time.time(); return True
         code = d.get("error_code", 0)
-        if code == 2006:
-            log("Kein Kapital (2006)", Y); return "NO_MARGIN"
-        log(f"Fehler: {d.get('error','')} (Code:{code})", R); return False
+        if code == 2006: log("⚠️ Kein Kapital (2006)", Y); return "NO_MARGIN"
+        log(f"❌ {d.get('error','')} (Code:{code})", R); return False
     except Exception as e:
         log(f"Order Exception: {e}", R); return False
     finally:
         order_lock = False
 
 
-# ─── GRID ─────────────────────────────────────────────────
-
 def build_neutral_grid(preis):
     global long_grid, short_grid, center_price, grid_aktiv
-    center_price = preis
-    long_grid  = []
-    short_grid = []
-
+    center_price = preis; long_grid = []; short_grid = []
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 - i * GRID_STEP/100))
-        tp    = round(entry * (1 + GRID_PROFIT/100))
-        long_grid.append({"entry":entry,"tp":tp,"filled":False,"open_time":0.0})
-
+        long_grid.append({"entry":entry,"tp":round(entry*(1+GRID_PROFIT/100)),"filled":False,"open_time":0.0})
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 + i * GRID_STEP/100))
-        tp    = round(entry * (1 - GRID_PROFIT/100))
-        short_grid.append({"entry":entry,"tp":tp,"filled":False,"open_time":0.0})
-
+        short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0})
     grid_aktiv = True
-    long_lvls  = " | ".join(fmt(lv["entry"]) for lv in long_grid)
-    short_lvls = " | ".join(fmt(lv["entry"]) for lv in short_grid)
     sl_u = fmt(center_price * (1 - (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     sl_o = fmt(center_price * (1 + (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     log(f"NEUTRAL GRID @ {fmt(preis)}", C)
-    log(f"LONG  Levels: {long_lvls}", G)
-    log(f"SHORT Levels: {short_lvls}", R)
+    log(f"📗 LONG:  {' | '.join(fmt(lv['entry']) for lv in long_grid)}", G)
+    log(f"📕 SHORT: {' | '.join(fmt(lv['entry']) for lv in short_grid)}", R)
     log(f"SL: {sl_u} <-> {sl_o}", Y)
 
 
@@ -201,13 +159,13 @@ def close_all(preis, reason=""):
     global total_pnl, wins, losses
     n_long=long_offen(); n_short=short_offen()
     if n_long==0 and n_short==0: reset_grid(); return
-    log(f"Schliesse {n_long}L + {n_short}S: {reason}", R)
+    log(f"⛔ {reason} — Schließe {n_long}L + {n_short}S", R)
     if n_long > 0:
         ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), sl_order=True)
         if ok is True:
             for lv in long_grid:
                 if lv["filled"]:
-                    pnl = (preis-lv["entry"])/lv["entry"]*100
+                    pnl=(preis-lv["entry"])/lv["entry"]*100
                     total_pnl+=pnl
                     if pnl>=0: wins+=1
                     else: losses+=1
@@ -216,15 +174,13 @@ def close_all(preis, reason=""):
         if ok is True:
             for lv in short_grid:
                 if lv["filled"]:
-                    pnl = (lv["entry"]-preis)/lv["entry"]*100
+                    pnl=(lv["entry"]-preis)/lv["entry"]*100
                     total_pnl+=pnl
                     if pnl>=0: wins+=1
                     else: losses+=1
     log(f"P&L: {total_pnl:+.2f}% | {wins}W {losses}L", G if total_pnl>=0 else R)
     reset_grid()
 
-
-# ─── LOOP ─────────────────────────────────────────────────
 
 def loop():
     global wins, losses, total_pnl
@@ -250,61 +206,62 @@ def loop():
                 close_all(preis, "SL OBEN"); time.sleep(INTERVAL); continue
 
             just_acted = False
-            order_bereit = (time.time() - last_order_t) >= 10
+            # 3 Sekunden Wartezeit zwischen Orders — kein Doppelkauf
+            order_bereit = (time.time() - last_order_t) >= 3
 
             # LONG LEVELS
             if order_bereit:
                 for lv in long_grid:
                     if not lv["filled"] and preis <= lv["entry"]*1.001:
-                        log(f"LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", G)
-                        lv["filled"] = True; lv["open_time"] = time.time()
+                        log(f"🟢 LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", G)
+                        lv["filled"]=True; lv["open_time"]=time.time()
                         ok = place_order(True, preis, ORDER_SIZE)
                         if not ok and ok != "NO_MARGIN":
-                            lv["filled"] = False; lv["open_time"] = 0.0
+                            lv["filled"]=False; lv["open_time"]=0.0
                         elif ok == "NO_MARGIN":
-                            lv["open_time"] = -1
-                        just_acted = True; break
+                            lv["open_time"]=-1
+                        just_acted=True; break
 
-            # LONG TP
+            # LONG TP — erst Order, dann State zurücksetzen
             if not just_acted:
                 for lv in long_grid:
-                    if not lv["filled"] or lv["open_time"] <= 0: continue
-                    if (time.time()-lv["open_time"]) < 30: continue
+                    if not lv["filled"] or lv["open_time"]<=0: continue
+                    if (time.time()-lv["open_time"])<30: continue
                     if preis >= lv["tp"]:
                         ok = place_order(False, preis, ORDER_SIZE)
                         if ok is True:
-                            lv["filled"] = False; lv["open_time"] = 0.0
                             pnl=(preis-lv["entry"])/lv["entry"]*100
+                            lv["filled"]=False; lv["open_time"]=0.0
                             total_pnl+=pnl; wins+=1
-                            log(f"LONG TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                        just_acted = True; break
+                            log(f"✅ LONG TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+                        just_acted=True; break
 
             # SHORT LEVELS
             if not just_acted and order_bereit:
                 for lv in short_grid:
                     if not lv["filled"] and preis >= lv["entry"]*0.999:
-                        log(f"SHORT @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", R)
-                        lv["filled"] = True; lv["open_time"] = time.time()
+                        log(f"🔴 SHORT @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])}", R)
+                        lv["filled"]=True; lv["open_time"]=time.time()
                         ok = place_order(False, preis, ORDER_SIZE)
                         if not ok and ok != "NO_MARGIN":
-                            lv["filled"] = False; lv["open_time"] = 0.0
+                            lv["filled"]=False; lv["open_time"]=0.0
                         elif ok == "NO_MARGIN":
-                            lv["open_time"] = -1
-                        just_acted = True; break
+                            lv["open_time"]=-1
+                        just_acted=True; break
 
-            # SHORT TP
+            # SHORT TP — erst Order, dann State zurücksetzen
             if not just_acted:
                 for lv in short_grid:
-                    if not lv["filled"] or lv["open_time"] <= 0: continue
-                    if (time.time()-lv["open_time"]) < 30: continue
+                    if not lv["filled"] or lv["open_time"]<=0: continue
+                    if (time.time()-lv["open_time"])<30: continue
                     if preis <= lv["tp"]:
                         ok = place_order(True, preis, ORDER_SIZE)
                         if ok is True:
-                            lv["filled"] = False; lv["open_time"] = 0.0
                             pnl=(lv["entry"]-preis)/lv["entry"]*100
+                            lv["filled"]=False; lv["open_time"]=0.0
                             total_pnl+=pnl; wins+=1
-                            log(f"SHORT TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
-                        just_acted = True; break
+                            log(f"✅ SHORT TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
+                        just_acted=True; break
 
             if tick % 2 == 0:
                 log(f"BTC {fmt(preis)} | L:{long_offen()}/{GRID_LEVELS} S:{short_offen()}/{GRID_LEVELS} | "
@@ -315,7 +272,7 @@ def loop():
         except KeyboardInterrupt:
             log("Bot gestoppt.", Y)
             if long_offen()>0 or short_offen()>0:
-                log(f"Offene Positionen: {long_offen()}L + {short_offen()}S -- manuell schliessen!", R)
+                log(f"⚠️ {long_offen()}L + {short_offen()}S offen — manuell schließen!", R)
             break
         except Exception as e:
             log(f"Fehler: {e}", R); time.sleep(5)
@@ -323,7 +280,7 @@ def loop():
 
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
-    print(f"  ║   Nado.xyz -- Neutral Grid Bot           ║")
+    print(f"  ║   Nado.xyz — Neutral Grid Bot            ║")
     print(f"  ║   LONG unten + SHORT oben gleichzeitig   ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet:  {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
