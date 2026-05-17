@@ -46,7 +46,7 @@ SL_PCT       = 0.8     # % Range Ausbruch → alles schliessen
 MIN_ORDER_WAIT = 5     # Sekunden Mindestabstand zwischen Orders
 SYNC_WAIT    = 180     # Sek nach Order kein Sync
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 # State
@@ -59,6 +59,7 @@ last_order_t = 0.0
 center_price = None  # Preis beim Grid-Start
 grid_aktiv   = False
 order_lock   = False  # Verhindert doppelte Orders
+nonce_counter = int(time.time() * 1000)  # Globaler Nonce-Zähler — immer eindeutig
 
 
 def ts():     return datetime.now().strftime("%H:%M:%S")
@@ -132,7 +133,7 @@ def sender_hex():
 
 
 def place_order(is_buy, price, size, sl_order=False):
-    global last_order_t, order_lock
+    global last_order_t, order_lock, nonce_counter
     # Globaler Lock — verhindert doppelte Orders
     if order_lock:
         log("⚠️ Order Lock aktiv — übersprungen", Y)
@@ -148,7 +149,9 @@ def place_order(is_buy, price, size, sl_order=False):
         px   = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt  = int(size*1e18) if is_buy else -int(size*1e18)
         exp  = int(time.time()) + 60
-        nonce = ((int(time.time()*1000)+5000) << 20) + random.randint(0, 99999)
+        # Eindeutiger Nonce — immer größer als vorheriger
+        nonce_counter += random.randint(1000, 9999)
+        nonce = nonce_counter
         sndr = sender_hex()
         dom  = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
