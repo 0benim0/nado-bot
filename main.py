@@ -30,10 +30,10 @@ GATEWAY      = "https://gateway.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
 ORDER_SIZE   = 0.0015
-GRID_LEVELS  = 1
+GRID_LEVELS  = 2
 GRID_STEP    = 0.1
 GRID_PROFIT  = 0.2
-SL_PCT       = 0.5
+SL_PCT       = 0.3
 INTERVAL     = 30
 DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
@@ -142,6 +142,8 @@ def build_neutral_grid(preis):
         entry = round(preis * (1 + i * GRID_STEP/100))
         short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0})
     grid_aktiv = True
+    global last_order_t
+    last_order_t = time.time()  # Verhindert sofortige doppelte Orders
     sl_u = fmt(center_price * (1 - (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     sl_o = fmt(center_price * (1 + (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     log(f"NEUTRAL GRID @ {fmt(preis)}", C)
@@ -207,7 +209,7 @@ def loop():
 
             just_acted = False
             # 3 Sekunden Wartezeit zwischen Orders — kein Doppelkauf
-            order_bereit = (time.time() - last_order_t) >= 6
+            order_bereit = (time.time() - last_order_t) >= 3
 
             # LONG LEVELS
             if order_bereit:
