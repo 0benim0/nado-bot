@@ -30,7 +30,7 @@ GATEWAY      = "https://gateway.prod.nado.xyz/v1"
 HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
 ORDER_SIZE   = 0.0015
-GRID_LEVELS  = 2
+GRID_LEVELS  = 1
 GRID_STEP    = 0.1
 GRID_PROFIT  = 0.2
 SL_PCT       = 0.5
@@ -207,7 +207,7 @@ def loop():
 
             just_acted = False
             # 3 Sekunden Wartezeit zwischen Orders — kein Doppelkauf
-            order_bereit = (time.time() - last_order_t) >= 3
+            order_bereit = (time.time() - last_order_t) >= 6
 
             # LONG LEVELS
             if order_bereit:
