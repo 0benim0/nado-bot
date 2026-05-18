@@ -33,7 +33,7 @@ ORDER_SIZE   = 0.0015
 GRID_LEVELS  = 2
 GRID_STEP    = 0.1
 GRID_PROFIT  = 0.2
-SL_PCT       = 0.3
+SL_PCT       = 0.5
 INTERVAL     = 30
 DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
