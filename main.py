@@ -35,7 +35,7 @@ GRID_STEP    = 0.1
 GRID_PROFIT  = 0.2
 SL_PCT       = 0.3
 INTERVAL     = 30
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
