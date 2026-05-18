@@ -35,7 +35,7 @@ GRID_STEP    = 0.1
 GRID_PROFIT  = 0.2
 SL_PCT       = 0.3
 INTERVAL     = 30
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
@@ -69,6 +69,17 @@ def get_preis():
                 px = float(p.get("oracle_price_x18") or p.get("mark_price_x18") or 0)
                 if px > 0: return px / 1e18
     except Exception as e: log(f"Preis Fehler: {e}", Y)
+    return None
+
+
+def get_nado_position():
+    try:
+        r = requests.get(f"{GATEWAY}/query?type=subaccount_info&subaccount={SUBACCOUNT}",
+                         headers={"Accept-Encoding":"gzip"}, timeout=15, verify=False)
+        for pb in r.json().get("data", {}).get("perp_balances", []):
+            if pb.get("product_id") == PRODUCT_ID:
+                return float(pb["balance"]["amount"]) / 1e18
+    except Exception as e: log(f"Nado Position Fehler: {e}", Y)
     return None
 
 
@@ -132,8 +143,36 @@ def place_order(is_buy, price, size, sl_order=False):
         order_lock = False
 
 
+def check_and_close_existing_positions(preis):
+    """
+    Beim Start: offene Positionen prüfen und schließen.
+    Verhindert Doppel-Orders nach Container-Neustart.
+    """
+    if DRY_RUN: return
+    log("Prüfe offene Positionen auf Nado...", C)
+    nado_pos = get_nado_position()
+    if nado_pos is None:
+        log("Keine Verbindung — starte trotzdem", Y); return
+    if abs(nado_pos) < 0.0001:
+        log("Keine offenen Positionen — OK!", G); return
+    log(f"⚠️ Offene Position: {nado_pos:.4f} BTC — schließe zuerst!", R)
+    size = round(abs(nado_pos), 4)
+    if nado_pos > 0:
+        log(f"Schließe LONG {size} BTC @ {fmt(preis)}", R)
+        ok = place_order(False, preis, size, sl_order=True)
+    else:
+        log(f"Schließe SHORT {size} BTC @ {fmt(preis)}", R)
+        ok = place_order(True, preis, size, sl_order=True)
+    if ok is True:
+        log("✅ Position geschlossen — Grid startet", G)
+        time.sleep(3)
+    else:
+        log("❌ Konnte nicht schließen — manuell auf app.nado.xyz schließen!", R)
+        time.sleep(10)
+
+
 def build_neutral_grid(preis):
-    global long_grid, short_grid, center_price, grid_aktiv
+    global long_grid, short_grid, center_price, grid_aktiv, last_order_t
     center_price = preis; long_grid = []; short_grid = []
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 - i * GRID_STEP/100))
@@ -142,8 +181,7 @@ def build_neutral_grid(preis):
         entry = round(preis * (1 + i * GRID_STEP/100))
         short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0})
     grid_aktiv = True
-    global last_order_t
-    last_order_t = time.time()  # Verhindert sofortige doppelte Orders
+    last_order_t = time.time()  # Verhindert sofortige Orders nach Grid-Start
     sl_u = fmt(center_price * (1 - (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     sl_o = fmt(center_price * (1 + (GRID_LEVELS*GRID_STEP + SL_PCT)/100))
     log(f"NEUTRAL GRID @ {fmt(preis)}", C)
@@ -189,6 +227,14 @@ def loop():
     tick = 0
     log(f"Neutral Grid Bot | {'DRY' if DRY_RUN else 'LIVE'}", C)
 
+    # ── STARTUP: Offene Positionen schließen ──────────────
+    startup_preis = None
+    while not startup_preis:
+        startup_preis = get_preis()
+        if not startup_preis: time.sleep(5)
+    check_and_close_existing_positions(startup_preis)
+    # ──────────────────────────────────────────────────────
+
     while True:
         try:
             tick += 1
@@ -208,7 +254,6 @@ def loop():
                 close_all(preis, "SL OBEN"); time.sleep(INTERVAL); continue
 
             just_acted = False
-            # 3 Sekunden Wartezeit zwischen Orders — kein Doppelkauf
             order_bereit = (time.time() - last_order_t) >= 3
 
             # LONG LEVELS
@@ -224,7 +269,7 @@ def loop():
                             lv["open_time"]=-1
                         just_acted=True; break
 
-            # LONG TP — erst Order, dann State zurücksetzen
+            # LONG TP
             if not just_acted:
                 for lv in long_grid:
                     if not lv["filled"] or lv["open_time"]<=0: continue
@@ -251,7 +296,7 @@ def loop():
                             lv["open_time"]=-1
                         just_acted=True; break
 
-            # SHORT TP — erst Order, dann State zurücksetzen
+            # SHORT TP
             if not just_acted:
                 for lv in short_grid:
                     if not lv["filled"] or lv["open_time"]<=0: continue
@@ -274,7 +319,7 @@ def loop():
         except KeyboardInterrupt:
             log("Bot gestoppt.", Y)
             if long_offen()>0 or short_offen()>0:
-                log(f"⚠️ {long_offen()}L + {short_offen()}S offen — manuell schließen!", R)
+                log(f"⚠️ {long_offen()}L + {short_offen()}S offen — manuell schliessen!", R)
             break
         except Exception as e:
             log(f"Fehler: {e}", R); time.sleep(5)
