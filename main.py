@@ -106,8 +106,12 @@ def get_nonce():
 
 
 def sender_hex(subaccount):
-    """Korrekte sender bytes32 direkt aus Subaccount-Adresse."""
-    return "0x" + subaccount.replace("0x", "")
+    """Korrekte sender bytes32 — direkt die Subaccount-Adresse verwenden."""
+    # Subaccount ist bereits die komplette 32-byte Adresse
+    hex_clean = subaccount.lower().replace("0x", "")
+    # Muss genau 64 hex chars (32 bytes) sein
+    hex_clean = hex_clean.ljust(64, "0")[:64]
+    return "0x" + hex_clean
 
 
 # ─── ORDER ────────────────────────────────────────────────
