@@ -41,7 +41,7 @@ GRID_STEP    = 0.1     # % Abstand zwischen Levels
 GRID_PROFIT  = 0.2     # % TP pro Level
 SL_PCT       = 0.5     # % nach letztem Level
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
