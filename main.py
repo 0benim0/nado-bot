@@ -42,7 +42,8 @@ GRID_STEP    = 0.1     # % Abstand zwischen Levels
 GRID_PROFIT  = 0.2     # % TP pro Level
 SL_PCT       = 0.5     # % nach letztem Level
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = False
+import os
+DRY_RUN      = os.environ.get("DRY_RUN", "False").lower() == "true"
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
