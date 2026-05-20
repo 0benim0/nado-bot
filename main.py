@@ -22,7 +22,8 @@ except:
 
 # ═══════════════════════════════════════════════════════════
 WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
-SIGNER_KEY   = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"  # 1-Click Trading Key
+SIGNER_KEY_SHORT = "0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d"    # 1-Click Key Account 1 (default) → SHORT
+SIGNER_KEY_LONG  = "0x876811f189916c9d8514210bf06cd70e739f29d9917b4ba532ec5adc7befff68"  # 1-Click Key Account 2 (default_1) → LONG
 
 # Account 1 (default) → SHORT Grid
 SUBACCOUNT_SHORT = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
@@ -41,7 +42,7 @@ GRID_STEP    = 0.1     # % Abstand zwischen Levels
 GRID_PROFIT  = 0.2     # % TP pro Level
 SL_PCT       = 0.5     # % nach letztem Level
 INTERVAL     = 30      # Sek pro Tick
-DRY_RUN      = True
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
 long_grid    = []
@@ -139,6 +140,7 @@ def place_order(is_buy, price, size, subaccount, sl_order=False):
             return True
 
         from eth_account import Account
+        signer_key = SIGNER_KEY_LONG if is_long_account else SIGNER_KEY_SHORT
         slip  = 0.005 if sl_order else 0.002
         px    = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
         amt   = int(size*1e18) if is_buy else -int(size*1e18)
@@ -153,7 +155,7 @@ def place_order(is_buy, price, size, subaccount, sl_order=False):
             {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
         msg   = {"sender":sndr,"priceX18":px,"amount":amt,
                  "expiration":exp,"nonce":nonce,"appendix":1}
-        acc   = Account.from_key(SIGNER_KEY)
+        acc   = Account.from_key(signer_key)
         sig   = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
         if not sig.startswith("0x"): sig = "0x"+sig
         pld   = {"place_order":{"product_id":PRODUCT_ID,"order":{
