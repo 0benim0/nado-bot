@@ -27,8 +27,8 @@ except:
 # ═══════════════════════════════════════════════════════════
 WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
 import os
-SIGNER_KEY_SHORT = os.environ.get("0x8097b0ec439aa91bd4f3c3ea79735be6688ce00589bbcd0e3dea2ab596580a4d", "")
-SIGNER_KEY_LONG  = os.environ.get("0x876811f189916c9d8514210bf06cd70e739f29d9917b4ba532ec5adc7befff68", "")
+SIGNER_KEY_SHORT = os.environ.get("", "")
+SIGNER_KEY_LONG  = os.environ.get("", "")
 
 # Account 1 (default) → SHORT Grid
 SUBACCOUNT_SHORT = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
