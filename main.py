@@ -110,10 +110,7 @@ def get_letzte_kerze():
     except Exception as e:
         log(f"Kerze Fehler: {e}", Y)
     return None
-        }
-    except Exception as e:
-        log(f"Kerze Fehler: {e}", Y)
-    return None
+        
 
 
 def get_position(subaccount):
