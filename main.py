@@ -5,7 +5,7 @@ LONG Grid  → Account 2 (default_1)
 SHORT Grid → Account 1 (default)
 Beide gleichzeitig — echter Neutral Grid!
 
-NEU:
+NEU: 
 - Trailing SL: SL folgt dem Preis wenn Trade im Profit
 - 5-Min Kerze Bestätigung: SHORT nur nach roter Kerze, LONG nur nach grüner Kerze
 
