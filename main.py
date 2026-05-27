@@ -3,13 +3,15 @@ Nado.xyz — Neutral Grid Bot (Dual Subaccount)
 ===============================================
 LONG Grid  → Account 2 (default_1)
 SHORT Grid → Account 1 (default)
-Beide gleichzeitig — echter Neutral Grid!
 
-NEU: 
-- Trailing SL: SL folgt dem Preis wenn Trade im Profit
-- 5-Min Kerze Bestätigung: SHORT nur nach roter Kerze, LONG nur nach grüner Kerze
+NEU:
+- Level Speicher: Level wird gespeichert wenn getroffen, wartet auf Kerze
+- SHORT: wartet auf rote 5-Min Kerze nach Level getroffen
+- LONG:  wartet auf grüne 5-Min Kerze nach Level getroffen
+- Limit Orders: 0% Maker Fee statt 0.035% Taker Fee
+- Trailing SL: auch als Limit Order
 
-Einrichten: SIGNER_KEY = 1-Click Trading Key (app.nado.xyz -> Settings)
+Einrichten: Keys als Umgebungsvariablen auf Server
 """
 
 import time, random, requests, sys, urllib3
@@ -27,13 +29,10 @@ except:
 # ═══════════════════════════════════════════════════════════
 WALLET_ADDR  = "0xc15263578ce7fd6290f56Ab78a23D3b6C653B28C"
 import os
-SIGNER_KEY_SHORT = os.environ.get("", "")
-SIGNER_KEY_LONG  = os.environ.get("", "")
+SIGNER_KEY_SHORT = os.environ.get("SIGNER_KEY_SHORT", "")
+SIGNER_KEY_LONG  = os.environ.get("SIGNER_KEY_LONG", "")
 
-# Account 1 (default) → SHORT Grid
 SUBACCOUNT_SHORT = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
-
-# Account 2 (default_1) → LONG Grid
 SUBACCOUNT_LONG  = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c745f31000000"
 
 PRODUCT_ID   = 2
@@ -45,7 +44,7 @@ ORDER_SIZE   = 0.0015
 GRID_LEVELS  = 2
 GRID_STEP    = 0.1
 GRID_PROFIT  = 4.2
-TRAIL_PCT    = 0.35   # % Trailing SL hinter bestem Preis
+TRAIL_PCT    = 0.6
 INTERVAL     = 30
 DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
@@ -62,11 +61,16 @@ grid_aktiv   = False
 lock_long    = False
 lock_short   = False
 
-# Trailing SL State
+# Trailing SL
 long_best    = None
 long_tsl     = None
 short_best   = None
 short_tsl    = None
+
+# Level Speicher — welches Level wartet auf Kerze
+pending_long  = None  # Level das auf grüne Kerze wartet
+pending_short = None  # Level das auf rote Kerze wartet
+last_kerze_time = 0.0  # Zeitstempel der letzten geprüften Kerze
 
 
 def ts():     return datetime.now().strftime("%H:%M:%S")
@@ -106,11 +110,11 @@ def get_letzte_kerze():
         kerze = cs[1]
         o = float(kerze.get("open_x18", 0)) / 1e18
         c = float(kerze.get("close_x18", 0)) / 1e18
-        return {"open": o, "close": c, "rot": c < o, "gruen": c > o}
+        t = int(kerze.get("timestamp", 0))
+        return {"open": o, "close": c, "rot": c < o, "gruen": c > o, "time": t}
     except Exception as e:
         log(f"Kerze Fehler: {e}", Y)
     return None
-        
 
 
 def get_position(subaccount):
@@ -144,7 +148,11 @@ def sender_hex(subaccount):
 
 # ─── ORDER ────────────────────────────────────────────────
 
-def place_order(is_buy, price, size, subaccount, sl_order=False):
+def place_order(is_buy, price, size, subaccount, limit=False):
+    """
+    limit=True  → Limit Order (0% Maker Fee) — Preis wird exakt gesetzt
+    limit=False → Market Order (0.035% Taker Fee) — mit Slippage
+    """
     global last_order_long, last_order_short, lock_long, lock_short
 
     is_long_account = (subaccount == SUBACCOUNT_LONG)
@@ -160,17 +168,30 @@ def place_order(is_buy, price, size, subaccount, sl_order=False):
     try:
         if DRY_RUN:
             side = "LONG-ACC" if is_long_account else "SHORT-ACC"
-            log(f"[DRY] {side} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
+            order_type = "LIMIT" if limit else "MARKET"
+            log(f"[DRY] {side} {order_type} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
             if is_long_account: last_order_long = time.time()
             else: last_order_short = time.time()
             return True
 
         from eth_account import Account
         signer_key = SIGNER_KEY_LONG if is_long_account else SIGNER_KEY_SHORT
-        slip  = 0.005 if sl_order else 0.002
-        px    = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
+
+        if limit:
+            # Limit Order: exakter Preis, kein Slippage
+            # Kleiner Puffer damit Order sicher gefüllt wird
+            if is_buy:
+                limit_price = round(price * 1.0005)  # 0.05% über Markt bei BUY
+            else:
+                limit_price = round(price * 0.9995)  # 0.05% unter Markt bei SELL
+            px = limit_price * int(1e18)
+        else:
+            # Market Order: mit Slippage
+            slip = 0.005
+            px = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
+
         amt   = int(size*1e18) if is_buy else -int(size*1e18)
-        exp   = int(time.time()) + 60
+        exp   = int(time.time()) + 300  # 5 Min für Limit Orders
         nonce = get_nonce()
         sndr  = sender_hex(subaccount)
         dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
@@ -191,7 +212,8 @@ def place_order(is_buy, price, size, subaccount, sl_order=False):
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            log("✅ Order OK!", G)
+            order_type = "LIMIT" if limit else "MARKET"
+            log(f"✅ {order_type} Order OK!", G)
             if is_long_account: last_order_long = time.time()
             else: last_order_short = time.time()
             return True
@@ -210,7 +232,6 @@ def place_order(is_buy, price, size, subaccount, sl_order=False):
 def update_trailing_sl(preis):
     global long_best, long_tsl, short_best, short_tsl
 
-    # LONG Trailing SL
     if long_offen() > 0:
         if long_best is None: long_best = preis
         if preis > long_best:
@@ -221,7 +242,6 @@ def update_trailing_sl(preis):
     else:
         long_best = None; long_tsl = None
 
-    # SHORT Trailing SL
     if short_offen() > 0:
         if short_best is None: short_best = preis
         if preis < short_best:
@@ -233,7 +253,7 @@ def update_trailing_sl(preis):
         short_best = None; short_tsl = None
 
 
-# ─── STARTUP CHECK ────────────────────────────────────────
+# ─── STARTUP ──────────────────────────────────────────────
 
 def check_and_close(subaccount, preis, name):
     if DRY_RUN: return
@@ -244,9 +264,9 @@ def check_and_close(subaccount, preis, name):
     log(f"⚠️ {name}: {pos:.4f} BTC offen — schließe!", R)
     size = round(abs(pos), 4)
     if pos > 0:
-        ok = place_order(False, preis, size, subaccount, sl_order=True)
+        ok = place_order(False, preis, size, subaccount, limit=False)
     else:
-        ok = place_order(True, preis, size, subaccount, sl_order=True)
+        ok = place_order(True, preis, size, subaccount, limit=False)
     if ok is True:
         log(f"✅ {name} Position geschlossen", G)
         time.sleep(2)
@@ -261,9 +281,11 @@ def build_neutral_grid(preis):
     global long_grid, short_grid, center_price, grid_aktiv
     global last_order_long, last_order_short
     global long_best, long_tsl, short_best, short_tsl
+    global pending_long, pending_short
     center_price = preis
     long_grid = []; short_grid = []
     long_best=None; long_tsl=None; short_best=None; short_tsl=None
+    pending_long=None; pending_short=None
 
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 - i * GRID_STEP/100))
@@ -280,14 +302,16 @@ def build_neutral_grid(preis):
     log(f"═══ NEUTRAL GRID @ {fmt(preis)} ═══", C)
     log(f"📗 LONG  (Acc2): {' | '.join(fmt(lv['entry']) for lv in long_grid)}", G)
     log(f"📕 SHORT (Acc1): {' | '.join(fmt(lv['entry']) for lv in short_grid)}", R)
-    log(f"Trailing SL: {TRAIL_PCT}% | Einstieg: grüne/rote 5-Min Kerze", Y)
+    log(f"Trailing: {TRAIL_PCT}% | TP: {GRID_PROFIT}% | Limit Orders", Y)
 
 
 def reset_grid():
     global long_grid, short_grid, center_price, grid_aktiv
     global long_best, long_tsl, short_best, short_tsl
+    global pending_long, pending_short
     long_grid=[]; short_grid=[]; center_price=None; grid_aktiv=False
     long_best=None; long_tsl=None; short_best=None; short_tsl=None
+    pending_long=None; pending_short=None
 
 
 def close_all(preis, reason=""):
@@ -295,7 +319,8 @@ def close_all(preis, reason=""):
     n_long=long_offen(); n_short=short_offen()
     log(f"⛔ {reason}", R)
     if n_long > 0:
-        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, sl_order=True)
+        # Limit Order zum Schließen
+        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, limit=True)
         if ok is True:
             for lv in long_grid:
                 if lv["filled"]:
@@ -304,7 +329,7 @@ def close_all(preis, reason=""):
                     if pnl>=0: wins+=1
                     else: losses+=1
     if n_short > 0:
-        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, sl_order=True)
+        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, limit=True)
         if ok is True:
             for lv in short_grid:
                 if lv["filled"]:
@@ -319,11 +344,10 @@ def close_all(preis, reason=""):
 # ─── LOOP ─────────────────────────────────────────────────
 
 def loop():
-    global wins, losses, total_pnl
+    global wins, losses, total_pnl, pending_long, pending_short, last_kerze_time
     tick = 0
     log(f"Neutral Grid Bot | Dual Subaccount | {'DRY' if DRY_RUN else 'LIVE'}", C)
 
-    # Startup: offene Positionen schließen
     startup_preis = None
     while not startup_preis:
         startup_preis = get_preis()
@@ -341,45 +365,50 @@ def loop():
                 build_neutral_grid(preis)
                 time.sleep(INTERVAL); continue
 
-            # Trailing SL aktualisieren
             update_trailing_sl(preis)
 
-            # ── LONG TRAILING SL PRÜFEN ───────────────────
+            # ── TRAILING SL ───────────────────────────────
             if long_tsl and long_offen() > 0 and preis <= long_tsl:
-                log(f"🔴 LONG TSL getroffen @ {fmt(preis)} (TSL:{fmt(long_tsl)}) [Acc2]", R)
+                log(f"🔴 LONG TSL @ {fmt(preis)} (TSL:{fmt(long_tsl)}) [Acc2]", R)
                 close_all(preis, "LONG TRAILING SL")
                 time.sleep(INTERVAL); continue
 
-            # ── SHORT TRAILING SL PRÜFEN ──────────────────
             if short_tsl and short_offen() > 0 and preis >= short_tsl:
-                log(f"🟢 SHORT TSL getroffen @ {fmt(preis)} (TSL:{fmt(short_tsl)}) [Acc1]", G)
+                log(f"🟢 SHORT TSL @ {fmt(preis)} (TSL:{fmt(short_tsl)}) [Acc1]", G)
                 close_all(preis, "SHORT TRAILING SL")
                 time.sleep(INTERVAL); continue
+
+            # Kerze holen
+            kerze = get_letzte_kerze()
 
             # ── LONG GRID (Account 2) ──────────────────────
             long_bereit = (time.time() - last_order_long) >= 3
 
-            if long_bereit:
+            if long_bereit and not pending_long:
                 for lv in long_grid:
                     if not lv["filled"] and preis <= lv["entry"]*1.001:
-                        kerze = get_letzte_kerze()
-                        if kerze and kerze["gruen"]:
-                            log(f"🟢 LONG @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])} ✅ grüne Kerze [Acc2]", G)
-                            lv["filled"]=True; lv["open_time"]=time.time()
-                            ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_LONG)
-                            if not ok and ok != "NO_MARGIN":
-                                lv["filled"]=False; lv["open_time"]=0.0
-                            elif ok == "NO_MARGIN": lv["open_time"]=-1
-                        else:
-                            log(f"⏳ LONG Level erreicht — warte auf grüne Kerze...", Y)
+                        log(f"⏳ LONG Level getroffen @ {fmt(lv['entry'])} — warte auf grüne Kerze [Acc2]", Y)
+                        pending_long = lv
                         break
 
-            # ── LONG TP ────────────────────────────────────
+            # Wenn LONG Level wartet — prüfe ob neue grüne Kerze kam
+            if pending_long and not pending_long["filled"]:
+                if kerze and kerze["gruen"] and kerze["time"] > last_kerze_time:
+                    log(f"🟢 LONG Limit @ {fmt(preis)} TP:{fmt(pending_long['tp'])} ✅ grüne Kerze [Acc2]", G)
+                    pending_long["filled"]=True; pending_long["open_time"]=time.time()
+                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
+                    if not ok and ok != "NO_MARGIN":
+                        pending_long["filled"]=False; pending_long["open_time"]=0.0
+                    elif ok == "NO_MARGIN": pending_long["open_time"]=-1
+                    pending_long = None
+                    if kerze: last_kerze_time = kerze["time"]
+
+            # LONG TP — Limit Order
             for lv in long_grid:
                 if not lv["filled"] or lv["open_time"]<=0: continue
                 if (time.time()-lv["open_time"])<30: continue
                 if preis >= lv["tp"]:
-                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_LONG)
+                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
                     if ok is True:
                         pnl=(preis-lv["entry"])/lv["entry"]*100
                         lv["filled"]=False; lv["open_time"]=0.0
@@ -390,27 +419,31 @@ def loop():
             # ── SHORT GRID (Account 1) ─────────────────────
             short_bereit = (time.time() - last_order_short) >= 3
 
-            if short_bereit:
+            if short_bereit and not pending_short:
                 for lv in short_grid:
                     if not lv["filled"] and preis >= lv["entry"]*0.999:
-                        kerze = get_letzte_kerze()
-                        if kerze and kerze["rot"]:
-                            log(f"🔴 SHORT @ {fmt(lv['entry'])} TP:{fmt(lv['tp'])} ✅ rote Kerze [Acc1]", R)
-                            lv["filled"]=True; lv["open_time"]=time.time()
-                            ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_SHORT)
-                            if not ok and ok != "NO_MARGIN":
-                                lv["filled"]=False; lv["open_time"]=0.0
-                            elif ok == "NO_MARGIN": lv["open_time"]=-1
-                        else:
-                            log(f"⏳ SHORT Level erreicht — warte auf rote Kerze...", Y)
+                        log(f"⏳ SHORT Level getroffen @ {fmt(lv['entry'])} — warte auf rote Kerze [Acc1]", Y)
+                        pending_short = lv
                         break
 
-            # ── SHORT TP ───────────────────────────────────
+            # Wenn SHORT Level wartet — prüfe ob neue rote Kerze kam
+            if pending_short and not pending_short["filled"]:
+                if kerze and kerze["rot"] and kerze["time"] > last_kerze_time:
+                    log(f"🔴 SHORT Limit @ {fmt(preis)} TP:{fmt(pending_short['tp'])} ✅ rote Kerze [Acc1]", R)
+                    pending_short["filled"]=True; pending_short["open_time"]=time.time()
+                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
+                    if not ok and ok != "NO_MARGIN":
+                        pending_short["filled"]=False; pending_short["open_time"]=0.0
+                    elif ok == "NO_MARGIN": pending_short["open_time"]=-1
+                    pending_short = None
+                    if kerze: last_kerze_time = kerze["time"]
+
+            # SHORT TP — Limit Order
             for lv in short_grid:
                 if not lv["filled"] or lv["open_time"]<=0: continue
                 if (time.time()-lv["open_time"])<30: continue
                 if preis <= lv["tp"]:
-                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_SHORT)
+                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
                     if ok is True:
                         pnl=(lv["entry"]-preis)/lv["entry"]*100
                         lv["filled"]=False; lv["open_time"]=0.0
@@ -422,8 +455,11 @@ def loop():
                 tsl_info = ""
                 if long_tsl:  tsl_info += f" LTSL:{fmt(long_tsl)}"
                 if short_tsl: tsl_info += f" STSL:{fmt(short_tsl)}"
+                pend = ""
+                if pending_long:  pend += " ⏳LONG"
+                if pending_short: pend += " ⏳SHORT"
                 log(f"BTC {fmt(preis)} | L:{long_offen()}/{GRID_LEVELS}[Acc2] S:{short_offen()}/{GRID_LEVELS}[Acc1] | "
-                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}%{tsl_info}")
+                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}%{tsl_info}{pend}")
 
             time.sleep(INTERVAL)
 
@@ -439,14 +475,13 @@ def loop():
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
     print(f"  ║   Nado.xyz — Neutral Grid Bot            ║")
-    print(f"  ║   Dual Subaccount: LONG + SHORT          ║")
+    print(f"  ║   Level Speicher + Limit Orders          ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet:    {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
     print(f"  LONG Acc:  default_1 (Account 2)")
     print(f"  SHORT Acc: default   (Account 1)")
     print(f"  Step:      {GRID_STEP}% | Levels: {GRID_LEVELS}L+{GRID_LEVELS}S | TP: {GRID_PROFIT}%")
-    print(f"  Trailing:  {TRAIL_PCT}% hinter bestem Preis")
-    print(f"  Einstieg:  LONG nach grüner | SHORT nach roter 5-Min Kerze")
+    print(f"  Trailing:  {TRAIL_PCT}% | Limit Orders: 0% Fee")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
     loop()
