@@ -95,21 +95,21 @@ def get_preis():
 
 
 def get_letzte_kerze():
-    """Letzte geschlossene 5-Min Kerze von Binance."""
+    """Letzte geschlossene 5-Min Kerze von Nado."""
     try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "5m", "limit": 2},
-            timeout=10
-        )
-        data = r.json()
-        if not data or len(data) < 2: return None
-        kerze = data[-2]  # letzte geschlossene Kerze
-        return {
-            "open":  float(kerze[1]),
-            "close": float(kerze[4]),
-            "rot":   float(kerze[4]) < float(kerze[1]),
-            "gruen": float(kerze[4]) > float(kerze[1]),
+        r = requests.post(
+            "https://archive.prod.nado.xyz/v1",
+            json={"candlesticks": {"product_id": PRODUCT_ID, "granularity": 300, "limit": 3}},
+            headers=HEADERS, timeout=15, verify=False)
+        cs = r.json().get("candlesticks", [])
+        if not cs or len(cs) < 2: return None
+        kerze = cs[1]
+        o = float(kerze.get("open_x18", 0)) / 1e18
+        c = float(kerze.get("close_x18", 0)) / 1e18
+        return {"open": o, "close": c, "rot": c < o, "gruen": c > o}
+    except Exception as e:
+        log(f"Kerze Fehler: {e}", Y)
+    return None
         }
     except Exception as e:
         log(f"Kerze Fehler: {e}", Y)
