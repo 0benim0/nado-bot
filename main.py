@@ -320,7 +320,7 @@ def close_all(preis, reason=""):
     log(f"⛔ {reason}", R)
     if n_long > 0:
         # Limit Order zum Schließen
-        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, limit=True)
+        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, limit=False)
         if ok is True:
             for lv in long_grid:
                 if lv["filled"]:
@@ -329,7 +329,7 @@ def close_all(preis, reason=""):
                     if pnl>=0: wins+=1
                     else: losses+=1
     if n_short > 0:
-        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, limit=True)
+        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, limit=False)
         if ok is True:
             for lv in short_grid:
                 if lv["filled"]:
