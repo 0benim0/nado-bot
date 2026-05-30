@@ -359,6 +359,13 @@ def build_neutral_grid(preis):
         short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0,"entry_price":0.0})
 
     grid_aktiv = True
+    # Limit Orders sofort ins Orderbuch setzen
+    for lv in short_grid:
+        place_order(False, lv["entry"], ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
+        time.sleep(1)
+    for lv in long_grid:
+        place_order(True, lv["entry"], ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
+        time.sleep(1)
     last_order_long  = time.time()
     last_order_short = time.time()
 
