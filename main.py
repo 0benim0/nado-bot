@@ -487,7 +487,7 @@ def loop():
                         break
 
             if pending_short and not pending_short["filled"]:
-                if kerze and kerze["rot"] and kerze["time"] > last_kerze_time:
+                if True:
                     log(f"🔴 SHORT Limit @ {fmt(preis)} TP:{fmt(pending_short['tp'])} ✅ rote Kerze [Acc1]", R)
                     ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
                     if ok is True:
