@@ -447,7 +447,7 @@ def loop():
                         break
 
             if pending_long and not pending_long["filled"]:
-                if kerze and kerze["gruen"] and kerze["time"] > last_kerze_time:
+                if True:
                     log(f"🟢 LONG Limit @ {fmt(preis)} TP:{fmt(pending_long['tp'])} ✅ grüne Kerze [Acc2]", G)
                     ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
                     if ok is True:
