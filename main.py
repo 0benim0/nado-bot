@@ -4,13 +4,11 @@ Nado.xyz — Neutral Grid Bot (Dual Subaccount)
 LONG Grid  → Account 2 (default_1)
 SHORT Grid → Account 1 (default)
 
-NEU:
-- Stop-Limit Trigger für TSL — Nado verwaltet TSL direkt
-- Alle Orders als Limit (0% Maker Fee)
+Stabile Version — bewährt seit 27. Mai
 - Level Speicher: wartet auf Kerze auch wenn Preis wegläuft
-- Startup schließt offene Positionen als Limit
-
-Einrichten: Keys als Umgebungsvariablen auf Server
+- SHORT nur nach roter 5-Min Kerze, LONG nur nach grüner
+- Trailing SL im Bot (zuverlässig)
+- Alle Orders als Limit (0% Fee wo möglich)
 """
 
 import time, random, requests, sys, urllib3
@@ -34,41 +32,42 @@ SIGNER_KEY_LONG  = os.environ.get("SIGNER_KEY_LONG", "")
 SUBACCOUNT_SHORT = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c740000000000"
 SUBACCOUNT_LONG  = "0xc15263578ce7fd6290f56ab78a23d3b6c653b28c64656661756c745f31000000"
 
-PRODUCT_ID    = 2
-CHAIN_ID      = 57073
-GATEWAY       = "https://gateway.prod.nado.xyz/v1"
-TRIGGER_URL   = "https://trigger.prod.nado.xyz/v1"
-HEADERS       = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
+PRODUCT_ID   = 2
+CHAIN_ID     = 57073
+GATEWAY      = "https://gateway.prod.nado.xyz/v1"
+HEADERS      = {"Accept-Encoding": "gzip", "Content-Type": "application/json"}
 
-ORDER_SIZE    = 0.0015
-GRID_LEVELS   = 2
-GRID_STEP     = 0.1
-GRID_PROFIT   = 4.2
-TRAIL_PCT     = 0.3    # % TSL hinter Einstieg — Stop-Limit Trigger
-INTERVAL      = 30
-DRY_RUN       = False
+ORDER_SIZE   = 0.0015
+GRID_LEVELS  = 2
+GRID_STEP    = 0.1
+GRID_PROFIT  = 4.2
+TRAIL_PCT    = 0.6
+INTERVAL     = 30
+DRY_RUN      = False
 # ═══════════════════════════════════════════════════════════
 
-long_grid     = []
-short_grid    = []
-wins          = 0
-losses        = 0
-total_pnl     = 0.0
+long_grid    = []
+short_grid   = []
+wins         = 0
+losses       = 0
+total_pnl    = 0.0
 last_order_long  = 0.0
 last_order_short = 0.0
-center_price  = None
-grid_aktiv    = False
-lock_long     = False
-lock_short    = False
+center_price = None
+grid_aktiv   = False
+lock_long    = False
+lock_short   = False
+
+# Trailing SL
+long_best    = None
+long_tsl     = None
+short_best   = None
+short_tsl    = None
 
 # Level Speicher
 pending_long  = None
 pending_short = None
 last_kerze_time = 0.0
-
-# Aktive TSL Trigger Digests
-tsl_digest_long  = None
-tsl_digest_short = None
 
 
 def ts():     return datetime.now().strftime("%H:%M:%S")
@@ -144,70 +143,56 @@ def sender_hex(subaccount):
     return "0x" + hex_clean
 
 
-def sign_order(is_buy, price, size, subaccount, expiry=300, limit=True):
-    """Signiert eine Order und gibt den Payload zurück."""
-    from eth_account import Account
-    signer_key = SIGNER_KEY_LONG if subaccount == SUBACCOUNT_LONG else SIGNER_KEY_SHORT
+# ─── ORDER ────────────────────────────────────────────────
 
-    if limit:
-        if is_buy:
-            px = round(price * 1.0005) * int(1e18)
-        else:
-            px = round(price * 0.9995) * int(1e18)
-    else:
-        slip = 0.005
-        px = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
-
-    amt   = int(size*1e18) if is_buy else -int(size*1e18)
-    exp   = int(time.time()) + expiry
-    nonce = get_nonce()
-    sndr  = sender_hex(subaccount)
-
-    dom = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
-           "verifyingContract":f"0x{PRODUCT_ID:040x}"}
-    typ = {"Order":[
-        {"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
-        {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
-        {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
-    msg = {"sender":sndr,"priceX18":px,"amount":amt,
-           "expiration":exp,"nonce":nonce,"appendix":1}
-
-    acc = Account.from_key(signer_key)
-    sig = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
-    if not sig.startswith("0x"): sig = "0x"+sig
-
-    order = {"sender":sndr,"priceX18":str(px),"amount":str(amt),
-             "expiration":str(exp),"nonce":str(nonce),"appendix":"1"}
-    return order, sig
-
-
-# ─── NORMAL ORDER ─────────────────────────────────────────
-
-def place_order(is_buy, price, size, subaccount, limit=True):
+def place_order(is_buy, price, size, subaccount, sl_order=False):
     global last_order_long, last_order_short, lock_long, lock_short
 
     is_long_account = (subaccount == SUBACCOUNT_LONG)
-    if is_long_account and lock_long: log("Lock LONG aktiv", Y); return False
-    if not is_long_account and lock_short: log("Lock SHORT aktiv", Y); return False
+
+    if is_long_account and lock_long:
+        log("Lock LONG aktiv", Y); return False
+    if not is_long_account and lock_short:
+        log("Lock SHORT aktiv", Y); return False
+
     if is_long_account: lock_long = True
     else: lock_short = True
 
     try:
         if DRY_RUN:
             side = "LONG-ACC" if is_long_account else "SHORT-ACC"
-            ot = "LIMIT" if limit else "MARKET"
-            log(f"[DRY] {side} {ot} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
+            log(f"[DRY] {side} {'BUY' if is_buy else 'SELL'} {size} BTC @ {fmt(price)}", Y)
             if is_long_account: last_order_long = time.time()
             else: last_order_short = time.time()
             return True
 
-        order, sig = sign_order(is_buy, price, size, subaccount, expiry=300, limit=limit)
-        pld = {"place_order":{"product_id":PRODUCT_ID,"order":order,"signature":sig}}
+        from eth_account import Account
+        signer_key = SIGNER_KEY_LONG if is_long_account else SIGNER_KEY_SHORT
+        slip  = 0.005 if sl_order else 0.002
+        px    = round(price * (1+slip if is_buy else 1-slip)) * int(1e18)
+        amt   = int(size*1e18) if is_buy else -int(size*1e18)
+        exp   = int(time.time()) + 60
+        nonce = get_nonce()
+        sndr  = sender_hex(subaccount)
+        dom   = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
+                 "verifyingContract":f"0x{PRODUCT_ID:040x}"}
+        typ   = {"Order":[
+            {"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
+            {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
+            {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
+        msg   = {"sender":sndr,"priceX18":px,"amount":amt,
+                 "expiration":exp,"nonce":nonce,"appendix":1}
+        acc   = Account.from_key(signer_key)
+        sig   = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
+        if not sig.startswith("0x"): sig = "0x"+sig
+        pld   = {"place_order":{"product_id":PRODUCT_ID,"order":{
+            "sender":sndr,"priceX18":str(px),"amount":str(amt),
+            "expiration":str(exp),"nonce":str(nonce),"appendix":"1"
+        },"signature":sig}}
         r = requests.post(f"{GATEWAY}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
         d = r.json()
         if d.get("status") == "success":
-            ot = "LIMIT" if limit else "MARKET"
-            log(f"✅ {ot} Order OK!", G)
+            log("✅ Order OK!", G)
             if is_long_account: last_order_long = time.time()
             else: last_order_short = time.time()
             return True
@@ -221,101 +206,30 @@ def place_order(is_buy, price, size, subaccount, limit=True):
         else: lock_short = False
 
 
-# ─── STOP-LIMIT TRIGGER ORDER ─────────────────────────────
+# ─── TRAILING SL ──────────────────────────────────────────
 
-def place_tsl_trigger(is_buy, entry_price, size, subaccount):
-    """
-    Setzt Stop-Limit Trigger Order für TSL direkt bei Nado.
-    SHORT TSL: oracle_price_above → Buy zurück
-    LONG  TSL: oracle_price_below → Sell
-    """
-    global tsl_digest_long, tsl_digest_short
-    is_long_account = (subaccount == SUBACCOUNT_LONG)
+def update_trailing_sl(preis):
+    global long_best, long_tsl, short_best, short_tsl
 
-    # TSL Preis berechnen
-    if is_buy:  # SHORT TSL → Preis steigt → Buy zurück
-        tsl_price = entry_price * (1 + TRAIL_PCT/100)
-        trigger = {"oracle_price_above": str(int(tsl_price * 1e18))}
-    else:        # LONG TSL → Preis fällt → Sell
-        tsl_price = entry_price * (1 - TRAIL_PCT/100)
-        trigger = {"oracle_price_below": str(int(tsl_price * 1e18))}
+    if long_offen() > 0:
+        if long_best is None: long_best = preis
+        if preis > long_best:
+            long_best = preis
+            long_tsl  = preis * (1 - TRAIL_PCT/100)
+        elif long_tsl is None:
+            long_tsl = preis * (1 - TRAIL_PCT/100)
+    else:
+        long_best = None; long_tsl = None
 
-    if DRY_RUN:
-        log(f"[DRY] TSL Trigger @ {fmt(tsl_price)} ({'oracle_price_above' if is_buy else 'oracle_price_below'})", Y)
-        return True
-
-    try:
-        # Appendix für Price Trigger = 4096
-        from eth_account import Account
-        signer_key = SIGNER_KEY_LONG if is_long_account else SIGNER_KEY_SHORT
-
-        # Limit Preis für die ausgelöste Order (leicht über TSL für sichere Füllung)
-        if is_buy:
-            limit_px = round(tsl_price * 1.002) * int(1e18)
-        else:
-            limit_px = round(tsl_price * 0.998) * int(1e18)
-
-        amt   = int(size*1e18) if is_buy else -int(size*1e18)
-        exp   = 4294967295  # Max expiry für Trigger Orders
-        nonce = get_nonce()
-        sndr  = sender_hex(subaccount)
-
-        dom = {"name":"Nado","version":"0.0.1","chainId":CHAIN_ID,
-               "verifyingContract":f"0x{PRODUCT_ID:040x}"}
-        typ = {"Order":[
-            {"name":"sender","type":"bytes32"},{"name":"priceX18","type":"int128"},
-            {"name":"amount","type":"int128"},{"name":"expiration","type":"uint64"},
-            {"name":"nonce","type":"uint64"},{"name":"appendix","type":"uint128"}]}
-        msg = {"sender":sndr,"priceX18":limit_px,"amount":amt,
-               "expiration":exp,"nonce":nonce,"appendix":4096}
-
-        acc = Account.from_key(signer_key)
-        sig = acc.sign_typed_data(domain_data=dom,message_types=typ,message_data=msg).signature.hex()
-        if not sig.startswith("0x"): sig = "0x"+sig
-
-        pld = {"place_order":{
-            "product_id": PRODUCT_ID,
-            "order": {
-                "sender": sndr,
-                "priceX18": str(limit_px),
-                "amount": str(amt),
-                "expiration": str(exp),
-                "nonce": str(nonce),
-                "appendix": "4096"
-            },
-            "trigger": {"price_trigger": {"price_requirement": trigger}},
-            "signature": sig
-        }}
-
-        r = requests.post(f"{TRIGGER_URL}/execute", json=pld, headers=HEADERS, timeout=15, verify=False)
-        d = r.json()
-        if d.get("status") == "success":
-            digest = d.get("data", {}).get("digest", "")
-            if is_long_account:
-                tsl_digest_long = digest
-            else:
-                tsl_digest_short = digest
-            log(f"✅ TSL Trigger @ {fmt(tsl_price)} gesetzt", G)
-            return True
-        log(f"❌ TSL Trigger Fehler: {d.get('error','')} (Code:{d.get('error_code',0)})", R)
-        return False
-    except Exception as e:
-        log(f"TSL Trigger Exception: {e}", R)
-        return False
-
-
-def cancel_tsl_trigger(subaccount):
-    """Bestehenden TSL Trigger löschen."""
-    is_long_account = (subaccount == SUBACCOUNT_LONG)
-    digest = tsl_digest_long if is_long_account else tsl_digest_short
-    if not digest or DRY_RUN: return
-    try:
-        pld = {"cancel_orders": {"product_id": PRODUCT_ID, "digests": [digest]}}
-        r = requests.post(f"{TRIGGER_URL}/execute", json=pld, headers=HEADERS, timeout=10, verify=False)
-        if r.json().get("status") == "success":
-            log("TSL Trigger gelöscht", Y)
-    except Exception as e:
-        log(f"TSL Cancel Fehler: {e}", Y)
+    if short_offen() > 0:
+        if short_best is None: short_best = preis
+        if preis < short_best:
+            short_best = preis
+            short_tsl  = preis * (1 + TRAIL_PCT/100)
+        elif short_tsl is None:
+            short_tsl = preis * (1 + TRAIL_PCT/100)
+    else:
+        short_best = None; short_tsl = None
 
 
 # ─── STARTUP ──────────────────────────────────────────────
@@ -329,12 +243,12 @@ def check_and_close(subaccount, preis, name):
     log(f"⚠️ {name}: {pos:.4f} BTC offen — schließe!", R)
     size = round(abs(pos), 4)
     if pos > 0:
-        ok = place_order(False, preis, size, subaccount, limit=True)
+        ok = place_order(False, preis, size, subaccount, sl_order=True)
     else:
-        ok = place_order(True, preis, size, subaccount, limit=True)
+        ok = place_order(True, preis, size, subaccount, sl_order=True)
     if ok is True:
         log(f"✅ {name} Position geschlossen", G)
-        time.sleep(3)
+        time.sleep(2)
     else:
         log(f"❌ {name} manuell schließen auf app.nado.xyz!", R)
         time.sleep(5)
@@ -345,71 +259,59 @@ def check_and_close(subaccount, preis, name):
 def build_neutral_grid(preis):
     global long_grid, short_grid, center_price, grid_aktiv
     global last_order_long, last_order_short
+    global long_best, long_tsl, short_best, short_tsl
     global pending_long, pending_short
     center_price = preis
     long_grid = []; short_grid = []
-    pending_long = None; pending_short = None
+    long_best=None; long_tsl=None; short_best=None; short_tsl=None
+    pending_long=None; pending_short=None
 
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 - i * GRID_STEP/100))
-        long_grid.append({"entry":entry,"tp":round(entry*(1+GRID_PROFIT/100)),"filled":False,"open_time":0.0,"entry_price":0.0})
+        long_grid.append({"entry":entry,"tp":round(entry*(1+GRID_PROFIT/100)),"filled":False,"open_time":0.0})
 
     for i in range(1, GRID_LEVELS+1):
         entry = round(preis * (1 + i * GRID_STEP/100))
-        short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0,"entry_price":0.0})
+        short_grid.append({"entry":entry,"tp":round(entry*(1-GRID_PROFIT/100)),"filled":False,"open_time":0.0})
 
     grid_aktiv = True
-    # Limit Orders sofort ins Orderbuch setzen
-    for lv in short_grid:
-        place_order(False, lv["entry"], ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
-        time.sleep(1)
-    for lv in long_grid:
-        place_order(True, lv["entry"], ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
-        time.sleep(1)
     last_order_long  = time.time()
     last_order_short = time.time()
 
     log(f"═══ NEUTRAL GRID @ {fmt(preis)} ═══", C)
     log(f"📗 LONG  (Acc2): {' | '.join(fmt(lv['entry']) for lv in long_grid)}", G)
     log(f"📕 SHORT (Acc1): {' | '.join(fmt(lv['entry']) for lv in short_grid)}", R)
-    log(f"TSL: {TRAIL_PCT}% Stop-Limit | TP: {GRID_PROFIT}% | Alle Limit Orders", Y)
+    log(f"TSL: {TRAIL_PCT}% | TP: {GRID_PROFIT}% | Step: {GRID_STEP}%", Y)
 
 
 def reset_grid():
     global long_grid, short_grid, center_price, grid_aktiv
-    global pending_long, pending_short, tsl_digest_long, tsl_digest_short
+    global long_best, long_tsl, short_best, short_tsl
+    global pending_long, pending_short
     long_grid=[]; short_grid=[]; center_price=None; grid_aktiv=False
+    long_best=None; long_tsl=None; short_best=None; short_tsl=None
     pending_long=None; pending_short=None
-    tsl_digest_long=None; tsl_digest_short=None
 
 
-def close_all_limit(preis, reason=""):
-    """Schließt alle Positionen mit Limit Order."""
+def close_all(preis, reason=""):
     global total_pnl, wins, losses
     n_long=long_offen(); n_short=short_offen()
     log(f"⛔ {reason}", R)
-
-    # Bestehende TSL Trigger löschen
-    cancel_tsl_trigger(SUBACCOUNT_LONG)
-    cancel_tsl_trigger(SUBACCOUNT_SHORT)
-
     if n_long > 0:
-        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, limit=True)
+        ok = place_order(False, preis, round(n_long*ORDER_SIZE,4), SUBACCOUNT_LONG, sl_order=True)
         if ok is True:
             for lv in long_grid:
                 if lv["filled"]:
-                    ep = lv.get("entry_price", lv["entry"])
-                    pnl=(preis-ep)/ep*100
+                    pnl=(preis-lv["entry"])/lv["entry"]*100
                     total_pnl+=pnl
                     if pnl>=0: wins+=1
                     else: losses+=1
     if n_short > 0:
-        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, limit=True)
+        ok = place_order(True, preis, round(n_short*ORDER_SIZE,4), SUBACCOUNT_SHORT, sl_order=True)
         if ok is True:
             for lv in short_grid:
                 if lv["filled"]:
-                    ep = lv.get("entry_price", lv["entry"])
-                    pnl=(ep-preis)/ep*100
+                    pnl=(lv["entry"]-preis)/lv["entry"]*100
                     total_pnl+=pnl
                     if pnl>=0: wins+=1
                     else: losses+=1
@@ -441,6 +343,21 @@ def loop():
                 build_neutral_grid(preis)
                 time.sleep(INTERVAL); continue
 
+            # Trailing SL aktualisieren
+            update_trailing_sl(preis)
+
+            # ── TRAILING SL PRÜFEN ────────────────────────
+            if long_tsl and long_offen() > 0 and preis <= long_tsl:
+                log(f"🔴 LONG TSL @ {fmt(preis)} (TSL:{fmt(long_tsl)}) [Acc2]", R)
+                close_all(preis, "LONG TRAILING SL")
+                time.sleep(INTERVAL); continue
+
+            if short_tsl and short_offen() > 0 and preis >= short_tsl:
+                log(f"🟢 SHORT TSL @ {fmt(preis)} (TSL:{fmt(short_tsl)}) [Acc1]", G)
+                close_all(preis, "SHORT TRAILING SL")
+                time.sleep(INTERVAL); continue
+
+            # Kerze holen
             kerze = get_letzte_kerze()
 
             # ── LONG GRID (Account 2) ──────────────────────
@@ -454,18 +371,16 @@ def loop():
                         break
 
             if pending_long and not pending_long["filled"]:
-                if True:
-                    log(f"🟢 LONG Limit @ {fmt(preis)} TP:{fmt(pending_long['tp'])} ✅ grüne Kerze [Acc2]", G)
-                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
+                if kerze and kerze["gruen"] and kerze["time"] > last_kerze_time:
+                    log(f"🟢 LONG @ {fmt(preis)} TP:{fmt(pending_long['tp'])} ✅ grüne Kerze [Acc2]", G)
+                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_LONG)
                     if ok is True:
                         pending_long["filled"]=True
                         pending_long["open_time"]=time.time()
-                        pending_long["entry_price"]=preis
-                        # TSL Trigger setzen
-                        place_tsl_trigger(False, preis, ORDER_SIZE, SUBACCOUNT_LONG)
                         last_kerze_time = kerze["time"]
                     elif ok == "NO_MARGIN":
-                        pending_long["filled"]=True; pending_long["open_time"]=-1
+                        pending_long["filled"]=True
+                        pending_long["open_time"]=-1
                     pending_long = None
 
             # LONG TP
@@ -473,12 +388,10 @@ def loop():
                 if not lv["filled"] or lv["open_time"]<=0: continue
                 if (time.time()-lv["open_time"])<30: continue
                 if preis >= lv["tp"]:
-                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_LONG, limit=True)
+                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_LONG)
                     if ok is True:
-                        cancel_tsl_trigger(SUBACCOUNT_LONG)
-                        ep = lv.get("entry_price", lv["entry"])
-                        pnl=(preis-ep)/ep*100
-                        lv["filled"]=False; lv["open_time"]=0.0; lv["entry_price"]=0.0
+                        pnl=(preis-lv["entry"])/lv["entry"]*100
+                        lv["filled"]=False; lv["open_time"]=0.0
                         total_pnl+=pnl; wins+=1
                         log(f"✅ LONG TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
                     break
@@ -494,18 +407,16 @@ def loop():
                         break
 
             if pending_short and not pending_short["filled"]:
-                if True:
-                    log(f"🔴 SHORT Limit @ {fmt(preis)} TP:{fmt(pending_short['tp'])} ✅ rote Kerze [Acc1]", R)
-                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
+                if kerze and kerze["rot"] and kerze["time"] > last_kerze_time:
+                    log(f"🔴 SHORT @ {fmt(preis)} TP:{fmt(pending_short['tp'])} ✅ rote Kerze [Acc1]", R)
+                    ok = place_order(False, preis, ORDER_SIZE, SUBACCOUNT_SHORT)
                     if ok is True:
                         pending_short["filled"]=True
                         pending_short["open_time"]=time.time()
-                        pending_short["entry_price"]=preis
-                        # TSL Trigger setzen
-                        place_tsl_trigger(True, preis, ORDER_SIZE, SUBACCOUNT_SHORT)
                         last_kerze_time = kerze["time"]
                     elif ok == "NO_MARGIN":
-                        pending_short["filled"]=True; pending_short["open_time"]=-1
+                        pending_short["filled"]=True
+                        pending_short["open_time"]=-1
                     pending_short = None
 
             # SHORT TP
@@ -513,23 +424,23 @@ def loop():
                 if not lv["filled"] or lv["open_time"]<=0: continue
                 if (time.time()-lv["open_time"])<30: continue
                 if preis <= lv["tp"]:
-                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_SHORT, limit=True)
+                    ok = place_order(True, preis, ORDER_SIZE, SUBACCOUNT_SHORT)
                     if ok is True:
-                        cancel_tsl_trigger(SUBACCOUNT_SHORT)
-                        ep = lv.get("entry_price", lv["entry"])
-                        pnl=(ep-preis)/ep*100
-                        lv["filled"]=False; lv["open_time"]=0.0; lv["entry_price"]=0.0
+                        pnl=(lv["entry"]-preis)/lv["entry"]*100
+                        lv["filled"]=False; lv["open_time"]=0.0
                         total_pnl+=pnl; wins+=1
                         log(f"✅ SHORT TP +{pnl:.2f}% | Total:{total_pnl:+.2f}% | {wins}W", G)
                     break
 
             if tick % 2 == 0:
+                tsl_info = ""
+                if long_tsl:  tsl_info += f" LTSL:{fmt(long_tsl)}"
+                if short_tsl: tsl_info += f" STSL:{fmt(short_tsl)}"
                 pend = ""
                 if pending_long:  pend += " ⏳LONG"
                 if pending_short: pend += " ⏳SHORT"
-                tsl = f" TSL:{TRAIL_PCT}%"
                 log(f"BTC {fmt(preis)} | L:{long_offen()}/{GRID_LEVELS}[Acc2] S:{short_offen()}/{GRID_LEVELS}[Acc1] | "
-                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}%{tsl}{pend}")
+                    f"{wins}W {losses}L P&L:{total_pnl:+.2f}%{tsl_info}{pend}")
 
             time.sleep(INTERVAL)
 
@@ -545,13 +456,13 @@ def loop():
 def main():
     print(f"\n{B}{C}  ╔══════════════════════════════════════════╗")
     print(f"  ║   Nado.xyz — Neutral Grid Bot            ║")
-    print(f"  ║   Stop-Limit TSL + Alle Limit Orders     ║")
+    print(f"  ║   Dual Subaccount: LONG + SHORT          ║")
     print(f"  ╚══════════════════════════════════════════╝{X}\n")
     print(f"  Wallet:    {WALLET_ADDR[:12]}...{WALLET_ADDR[-6:]}")
     print(f"  LONG Acc:  default_1 (Account 2)")
     print(f"  SHORT Acc: default   (Account 1)")
     print(f"  Step:      {GRID_STEP}% | Levels: {GRID_LEVELS}L+{GRID_LEVELS}S | TP: {GRID_PROFIT}%")
-    print(f"  TSL:       {TRAIL_PCT}% Stop-Limit Trigger | 0% Fee")
+    print(f"  TSL:       {TRAIL_PCT}% | Kerzen: Nado 5-Min")
     modus = f"{Y}DRY RUN{X}" if DRY_RUN else f"{R}{B}LIVE{X}"
     print(f"  Modus:     {modus}\n")
     loop()
